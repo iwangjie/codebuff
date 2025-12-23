@@ -3,12 +3,15 @@
  */
 export type ToolName =
   | 'add_message'
+  | 'ask_user'
   | 'code_search'
   | 'end_turn'
   | 'find_files'
   | 'glob'
   | 'list_directory'
   | 'lookup_agent_info'
+  | 'propose_str_replace'
+  | 'propose_write_file'
   | 'read_docs'
   | 'read_files'
   | 'read_subtree'
@@ -18,6 +21,7 @@ export type ToolName =
   | 'set_output'
   | 'spawn_agents'
   | 'str_replace'
+  | 'suggest_followups'
   | 'task_completed'
   | 'think_deeply'
   | 'web_search'
@@ -29,12 +33,15 @@ export type ToolName =
  */
 export interface ToolParamsMap {
   add_message: AddMessageParams
+  ask_user: AskUserParams
   code_search: CodeSearchParams
   end_turn: EndTurnParams
   find_files: FindFilesParams
   glob: GlobParams
   list_directory: ListDirectoryParams
   lookup_agent_info: LookupAgentInfoParams
+  propose_str_replace: ProposeStrReplaceParams
+  propose_write_file: ProposeWriteFileParams
   read_docs: ReadDocsParams
   read_files: ReadFilesParams
   read_subtree: ReadSubtreeParams
@@ -44,6 +51,7 @@ export interface ToolParamsMap {
   set_output: SetOutputParams
   spawn_agents: SpawnAgentsParams
   str_replace: StrReplaceParams
+  suggest_followups: SuggestFollowupsParams
   task_completed: TaskCompletedParams
   think_deeply: ThinkDeeplyParams
   web_search: WebSearchParams
@@ -57,6 +65,39 @@ export interface ToolParamsMap {
 export interface AddMessageParams {
   role: 'user' | 'assistant'
   content: string
+}
+
+/**
+ * Ask the user multiple choice questions and pause execution until they respond.
+ */
+export interface AskUserParams {
+  /** List of multiple choice questions to ask the user */
+  questions: {
+    /** The question to ask the user */
+    question: string
+    /** Short label (max 12 chars) displayed as a chip/tag */
+    header?: string
+    /** Array of answer options with label and optional description (minimum 2) */
+    options: {
+      /** The display text for this option */
+      label: string
+      /** Explanation shown when option is focused */
+      description?: string
+    }[]
+    /** If true, allows selecting multiple options (checkbox). If false, single selection only (radio). */
+    multiSelect?: boolean
+    /** Validation rules for "Other" text input */
+    validation?: {
+      /** Maximum length for "Other" text input */
+      maxLength?: number
+      /** Minimum length for "Other" text input */
+      minLength?: number
+      /** Regex pattern for "Other" text input */
+      pattern?: string
+      /** Custom error message when pattern fails */
+      patternError?: string
+    }
+  }[]
 }
 
 /**
@@ -110,6 +151,35 @@ export interface ListDirectoryParams {
 export interface LookupAgentInfoParams {
   /** Agent ID (short local or full published format) */
   agentId: string
+}
+
+/**
+ * Propose string replacements in a file without actually applying them.
+ */
+export interface ProposeStrReplaceParams {
+  /** The path to the file to edit. */
+  path: string
+  /** Array of replacements to make. */
+  replacements: {
+    /** The string to replace. This must be an *exact match* of the string you want to replace, including whitespace and punctuation. */
+    old: string
+    /** The string to replace the corresponding old string with. Can be empty to delete. */
+    new: string
+    /** Whether to allow multiple replacements of old string. */
+    allowMultiple?: boolean
+  }[]
+}
+
+/**
+ * Propose creating or editing a file without actually applying the changes.
+ */
+export interface ProposeWriteFileParams {
+  /** Path to the file relative to the **project root** */
+  path: string
+  /** What the change is intended to do in only one sentence. */
+  instructions: string
+  /** Edit snippet to apply to the file. */
+  content: string
 }
 
 /**
@@ -208,6 +278,19 @@ export interface StrReplaceParams {
 }
 
 /**
+ * Suggest clickable followup prompts to the user.
+ */
+export interface SuggestFollowupsParams {
+  /** List of suggested followup prompts the user can click to send */
+  followups: {
+    /** The full prompt text to send as a user message when clicked */
+    prompt: string
+    /** Short display label for the card (defaults to truncated prompt if not provided) */
+    label?: string
+  }[]
+}
+
+/**
  * Signal that the task is complete. Use this tool when:
 - The user's request is completely fulfilled
 - You need clarification from the user before continuing
@@ -248,10 +331,10 @@ export interface WriteFileParams {
 }
 
 /**
- * Write a todo list to track tasks. Use this frequently to maintain a step-by-step plan.
+ * Write a todo list to track tasks for multi-step implementations. Use this frequently to maintain an updated step-by-step plan.
  */
 export interface WriteTodosParams {
-  /** List of todos with their completion status. Try to order the todos the same way you will complete them. Do not mark todos as completed if you have not completed them yet! */
+  /** List of todos with their completion status. Add ALL of the applicable tasks to the list, so you don't forget to do anything. Try to order the todos the same way you will complete them. Do not mark todos as completed if you have not completed them yet! */
   todos: {
     /** Description of the task */
     task: string

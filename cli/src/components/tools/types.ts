@@ -1,7 +1,7 @@
-import type { ToolName } from '@codebuff/sdk'
-import type { ReactNode } from 'react'
 import type { ContentBlock } from '../../types/chat'
 import type { ChatTheme } from '../../types/theme-system'
+import type { ToolName } from '@codebuff/sdk'
+import type { ReactNode } from 'react'
 
 export type ToolBlock = Extract<ContentBlock, { type: 'tool' }>
 
@@ -10,7 +10,6 @@ export type ToolRenderOptions = {
   indentationOffset: number
   previewPrefix?: string
   labelWidth: number
-  branchChar: string
 }
 
 export type ToolRenderConfig = {
@@ -29,10 +28,10 @@ export type ToolRenderConfig = {
 export interface ToolComponent<T extends ToolName = ToolName> {
   /** The tool name this component handles */
   toolName: T
-  
+
   /**
    * Render function that returns configuration for how to display this tool.
-   * 
+   *
    * @param toolBlock - The tool block data containing input/output
    * @param theme - The current chat theme
    * @param options - Rendering options like width and indentation
@@ -42,7 +41,7 @@ export interface ToolComponent<T extends ToolName = ToolName> {
     toolBlock: ToolBlock & { toolName: T },
     theme: ChatTheme,
     options: ToolRenderOptions,
-  ): ToolRenderConfig | null
+  ): ToolRenderConfig
 }
 
 /**

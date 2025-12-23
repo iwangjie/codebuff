@@ -11,6 +11,7 @@ import { RunAgentButton } from './run-agent-button'
 import { SaveAgentButton } from './save-agent-button'
 import { VersionUsageBadge } from './version-usage-badge'
 
+import { AgentDependencyTree } from '@/components/agent/agent-dependency-tree'
 import { TypeScriptViewer } from '@/components/agent/typescript-viewer'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { BackButton } from '@/components/ui/back-button'
@@ -20,14 +21,15 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 
 interface AgentDetailPageProps {
-  params: {
+  params: Promise<{
     id: string // publisher id
     agentId: string
     version: string
-  }
+  }>
 }
 
 export async function generateMetadata({ params }: AgentDetailPageProps) {
+  const { id, agentId, version } = await params
   const agent = await db
     .select({
       data: schema.agentConfig.data,
@@ -40,9 +42,9 @@ export async function generateMetadata({ params }: AgentDetailPageProps) {
     )
     .where(
       and(
-        eq(schema.publisher.id, params.id),
-        eq(schema.agentConfig.id, params.agentId),
-        eq(schema.agentConfig.version, params.version),
+        eq(schema.publisher.id, id),
+        eq(schema.agentConfig.id, agentId),
+        eq(schema.agentConfig.version, version),
       ),
     )
     .limit(1)
@@ -57,22 +59,39 @@ export async function generateMetadata({ params }: AgentDetailPageProps) {
     typeof agent[0].data === 'string'
       ? JSON.parse(agent[0].data)
       : agent[0].data
-  const agentName = agentData.name || params.agentId
+  const agentName = agentData.name || agentId
+  // Fetch publisher for OG image
+  const pub = await db
+    .select()
+    .from(schema.publisher)
+    .where(eq(schema.publisher.id, id))
+    .limit(1)
+
+  const title = `${agentName} v${agent[0].version} - Agent Details`
+  const description =
+    agentData.description ||
+    `View details for ${agentName} version ${agent[0].version}`
+  const ogImages = (pub?.[0]?.avatar_url ? [pub[0].avatar_url] : []) as string[]
 
   return {
-    title: `${agentName} v${agent[0].version} - Agent Details`,
-    description:
-      agentData.description ||
-      `View details for ${agentName} version ${agent[0].version}`,
+    title,
+    description,
+    openGraph: {
+      title,
+      description,
+      type: 'article',
+      images: ogImages,
+    },
   }
 }
 
 const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
+  const { id, agentId, version } = await params
   // Get publisher info
   const publisher = await db
     .select()
     .from(schema.publisher)
-    .where(eq(schema.publisher.id, params.id))
+    .where(eq(schema.publisher.id, id))
     .limit(1)
 
   if (publisher.length === 0) {
@@ -87,9 +106,9 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
     .from(schema.agentConfig)
     .where(
       and(
-        eq(schema.agentConfig.publisher_id, params.id),
-        eq(schema.agentConfig.id, params.agentId),
-        eq(schema.agentConfig.version, params.version),
+        eq(schema.agentConfig.publisher_id, id),
+        eq(schema.agentConfig.id, agentId),
+        eq(schema.agentConfig.version, version),
       ),
     )
     .limit(1)
@@ -102,7 +121,7 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
     typeof agent[0].data === 'string'
       ? JSON.parse(agent[0].data)
       : agent[0].data
-  const agentName = agentData.name || params.agentId
+  const agentName = agentData.name || agentId
 
   // Get all versions of this agent for navigation
   const allVersions = await db
@@ -113,8 +132,8 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
     .from(schema.agentConfig)
     .where(
       and(
-        eq(schema.agentConfig.publisher_id, params.id),
-        eq(schema.agentConfig.id, params.agentId),
+        eq(schema.agentConfig.publisher_id, id),
+        eq(schema.agentConfig.id, agentId),
       ),
     )
     .orderBy(schema.agentConfig.created_at)
@@ -124,9 +143,9 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
     allVersions.sort(
       (a, b) =>
         new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    )[0]?.version || params.version
+    )[0]?.version || version
 
-  const fullAgentId = `${params.id}/${params.agentId}@${latestVersion}`
+  const fullAgentId = `${id}/${agentId}@${latestVersion}`
 
   return (
     <div className="container mx-auto py-6 px-4">
@@ -149,7 +168,7 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
                     variant="outline"
                     className="text-sm self-start sm:self-auto"
                   >
-                    v{params.version}
+                    v{version}
                   </Badge>
                 </div>
                 <div className="mb-2">
@@ -223,14 +242,14 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
                         new Date(b.created_at).getTime() -
                         new Date(a.created_at).getTime(),
                     )
-                    .map((version, index) => (
+                    .map((v, index) => (
                       <Link
-                        key={version.version}
-                        href={`/publishers/${params.id}/agents/${params.agentId}/${version.version}`}
+                        key={v.version}
+                        href={`/publishers/${id}/agents/${agentId}/${v.version}`}
                       >
                         <Button
                           variant={
-                            version.version === params.version
+                            v.version === version
                               ? 'default'
                               : 'ghost'
                           }
@@ -240,13 +259,13 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
                           <div className="flex items-center justify-between w-full">
                             <div className="flex items-center">
                               <span className="font-mono">
-                                v{version.version}
+                                v{v.version}
                               </span>
                               {index !== 0 && (
                                 <VersionUsageBadge
-                                  publisherId={params.id}
-                                  agentId={params.agentId}
-                                  version={version.version}
+                                  publisherId={id}
+                                  agentId={agentId}
+                                  version={v.version}
                                 />
                               )}
                             </div>
@@ -254,7 +273,7 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
                               <Badge
                                 className={cn(
                                   'text-xs px-1.5 py-0 border pointer-events-none',
-                                  version.version === params.version
+                                  v.version === version
                                     ? 'bg-background text-foreground border-background'
                                     : 'bg-muted text-muted-foreground border-muted',
                                 )}
@@ -280,19 +299,31 @@ const AgentDetailPage = async ({ params }: AgentDetailPageProps) => {
                   <h3 className="text-base font-semibold mb-3 flex items-center gap-2">
                     Usage Statistics
                     <Badge variant="secondary" className="text-xs">
-                      v{params.version}
+                      v{version}
                     </Badge>
                   </h3>
                   <AgentUsageMetrics
-                    publisherId={params.id}
-                    agentId={params.agentId}
-                    version={params.version}
+                    publisherId={id}
+                    agentId={agentId}
+                    version={version}
                   />
                 </div>
 
                 {/* Agent Definition */}
                 <div className="border-t pt-6">
                   <h3 className="text-base font-semibold mb-3">Definition</h3>
+                  
+                  {/* Subagents - part of the definition */}
+                  {agentData.spawnableAgents && agentData.spawnableAgents.length > 0 && (
+                    <div className="mb-4">
+                      <AgentDependencyTree
+                        publisherId={id}
+                        agentId={agentId}
+                        version={version}
+                      />
+                    </div>
+                  )}
+                  
                   <TypeScriptViewer data={agentData} />
                 </div>
               </CardContent>

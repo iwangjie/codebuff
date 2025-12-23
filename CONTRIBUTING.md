@@ -1,6 +1,6 @@
 # Contributing to Codebuff
 
-Hey there! 👋 Thanks for wanting to contribute to Codebuff. Whether you're squashing bugs, building cool features, or making our docs better, we're excited to have you aboard!
+Hey there! 👋 Thanks for contributing to Codebuff. Bug fixes, features, and documentation improvements are welcome.
 
 ## Getting Started
 
@@ -9,94 +9,71 @@ Hey there! 👋 Thanks for wanting to contribute to Codebuff. Whether you're squ
 Before you begin, you'll need to install a few tools:
 
 1. **Bun** (our primary package manager): Follow the [Bun installation guide](https://bun.sh/docs/installation)
-2. **direnv**: This manages environment variables automatically
-   - macOS: `brew install direnv`
-   - Ubuntu/Debian: `sudo apt install direnv`
-   - Other systems: See [direnv installation guide](https://direnv.net/docs/installation.html)
-3. **Docker**: Required for the web server database
-4. **Infisical CLI**: For secrets management
-   ```bash
-   npm install -g @infisical/cli
-   ```
+2. **Docker**: Required for the web server database
 
 ### Setting Up Your Development Environment
 
-1. **Hook direnv into your shell** (one-time setup):
-
-   - For zsh: `echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc && source ~/.zshrc`
-   - For bash: `echo 'eval "$(direnv hook bash)"' >> ~/.bashrc && source ~/.bashrc`
-   - For fish: `echo 'direnv hook fish | source' >> ~/.config/fish/config.fish && source ~/.config/fish/config.fish`
-
-2. **Restart your shell**: Run `exec $SHELL` or restart your terminal
-
-3. **Clone the repository**:
+1. **Clone the repository**:
 
    ```bash
    git clone https://github.com/CodebuffAI/codebuff.git
    cd codebuff
    ```
 
-4. **Set up secrets management**:
+2. **Set up environment variables**:
 
    ```bash
-   npm install -g @infisical/cli
-   infisical init
-   infisical login
-   # Select "US" region when prompted
+   # Copy the example file
+   cp .env.example .env.local
+   
+   # Edit .env.local and update DATABASE_URL to match Docker:
+   # DATABASE_URL=postgresql://manicode_user_local:secretpassword_local@localhost:5432/manicode_db_local
    ```
 
-   Follow the [Infisical Setup Guide](./INFISICAL_SETUP_GUIDE.md) for detailed setup instructions.
+   > **Team members**: For shared secrets management, see the [Infisical Setup Guide](./INFISICAL_SETUP_GUIDE.md).
 
-   Load all environment variables at once:
-
-   ```bash
-   infisical secrets set --file .env.example
-   infisical secrets set DATABASE_URL=postgresql://manicode_user_local:secretpassword_local@localhost:5432/manicode_db_local
-   ```
-
-5. **Configure environment**:
-
-   ```bash
-   direnv allow
-   ```
-
-6. **Install dependencies**:
+3. **Install dependencies**:
 
    ```bash
    bun install
    ```
 
-7. **Setup a Github OAuth app**
+4. **Setup a Github OAuth app**
 
    1. Follow these instructions to set up a [Github OAuth app](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)
-   2. Find your app's Github client ID and secret access key and set them in Infisical:
+   2. Add your Github client ID and secret to `.env.local`:
 
    ```bash
-   infisical secrets set CODEBUFF_GITHUB_ID=<your-github-app-id-here>
-   infisical secrets set CODEBUFF_GITHUB_SECRET=<your-github-app-secret-here>
+   CODEBUFF_GITHUB_ID=<your-github-app-id-here>
+   CODEBUFF_GITHUB_SECRET=<your-github-app-secret-here>
    ```
 
-8. **Start development services** (requires 3 terminals):
+5. **Start development services**:
+
+   **Option A: All-in-one (recommended)**
 
    ```bash
-   # Terminal 1 - Backend server (start first)
-   bun run start-server
-   # Expected: 🚀 Server is running on port 4242
+   bun run dev
+   # Starts the web server, builds the SDK, and launches the CLI automatically
+   ```
 
-   # Terminal 2 - Web server (start second)
+   **Option B: Separate terminals (for more control)**
+
+   ```bash
+   # Terminal 1 - Web server (start first)
    bun run start-web
    # Expected: Ready on http://localhost:3000
 
-   # Terminal 3 - CLI client (start last)
-   bun run start-bin
+   # Terminal 2 - CLI client (requires web server to be running first)
+   bun run start-cli
    # Expected: Welcome to Codebuff! + agent list
    ```
 
    Now, you should be able to run the CLI and send commands, but it will error out because you don't have any credits.
 
-   **Note**: CLI requires both backend and web server running for authentication.
+   **Note**: CLI requires the web server running for authentication.
 
-9. **Giving yourself credits**:
+6. **Giving yourself credits**:
 
    1. Log into Codebuff at [http://localhost:3000/login](http://localhost:3000/login)
 
@@ -112,7 +89,7 @@ Before you begin, you'll need to install a few tools:
 
    Now, you should be able to run the CLI commands locally from within the `codebuff` directory.
 
-10. **Running in other directories**:
+7. **Running in other directories**:
 
 In order to run the CLI from other directories, you need to first publish the agents to the database.
 
@@ -121,13 +98,13 @@ In order to run the CLI from other directories, you need to first publish the ag
 - Run:
 
   ```bash
-  bun run start-bin publish base
+  bun run start-cli publish base
   ```
 
 - It will give you an error along the lines of `Invalid agent ID: [some agent ID]`, e.g. `Invalid agent ID: context-pruner`. You need to publish that agent at the same time, e.g.:
 
   ```bash
-  bun run start-bin publish base context-pruner
+  bun run start-cli publish base context-pruner
   ```
 
 - Repeat this until there are no more errors.
@@ -135,22 +112,21 @@ In order to run the CLI from other directories, you need to first publish the ag
   - As of the time of writing, the command required is:
 
   ```bash
-  bun start-bin publish base context-pruner file-explorer file-picker researcher thinker reviewer
+  bun start-cli publish base context-pruner file-explorer file-picker researcher thinker reviewer
   ```
 
 - Now, you can start the CLI in any directory by running:
 
   ```bash
-  bun run start-bin --cwd [some/other/directory]
+  bun run start-cli --cwd [some/other/directory]
   ```
 
 ## Understanding the Codebase
 
 Codebuff is organized as a monorepo with these main packages:
 
-- **backend/**: WebSocket server, LLM integration, agent orchestration
-- **npm-app/**: CLI application that users interact with
 - **web/**: Next.js web application and dashboard
+- **cli/**: CLI application that users interact with
 - **python-app/**: Python version of the CLI (experimental)
 - **common/**: Shared code, database schemas, utilities
 - **sdk/**: TypeScript SDK for programmatic usage
@@ -171,15 +147,13 @@ Not sure where to start? Here are some great ways to jump in:
 
 ### Development Workflow
 
-Here's how we like to work together:
+1. **Fork and branch** - Create a fork and a new branch
+2. **Follow style guidelines** - See below
+3. **Test** - Write tests for new features, run `bun test`
+4. **Type check** - Run `bun run typecheck`
+5. **Submit a PR** - Clear description of changes
 
-1. **Fork and branch** - Create your own fork and a new branch for your changes
-2. **Code away** - Follow our style guidelines (more on that below)
-3. **Test it** - Write tests for new features and run `bun test` to make sure everything works
-4. **Type check** - Run `bun run typecheck` to catch any TypeScript issues
-5. **Submit a PR** - Open a pull request with a clear description of what you built and why
-
-_Pro tip: Small, focused PRs are easier to review and merge quickly!_
+Small PRs merge faster.
 
 ### Code Style Guidelines
 
@@ -227,7 +201,7 @@ cd cli
 bun run test:tmux-poc
 ```
 
-See [cli/src/__tests__/README.md](cli/src/__tests__/README.md) for comprehensive interactive testing documentation.
+See [cli/src/**tests**/README.md](cli/src/__tests__/README.md) for comprehensive interactive testing documentation.
 
 ### Commit Messages
 
@@ -242,40 +216,36 @@ test: add unit tests for file operations
 
 ## Areas Where We Need Help
 
-There are tons of ways to make Codebuff better! Here are some areas where your skills could really shine:
-
 ### 🤖 **Agent Development**
 
-Build specialized agents in `.agents/` for different languages, frameworks, or workflows. Think React experts, Python debuggers, or Git wizards!
+Build agents in `.agents/` for different languages, frameworks, or workflows.
 
 ### 🔧 **Tool System**
 
-Add new capabilities in `backend/src/tools.ts` - file operations, API integrations, development environment helpers. The sky's the limit!
+Add capabilities in `common/src/tools` and SDK helpers: file operations, API integrations, dev environment helpers.
 
 ### 📦 **SDK Improvements**
 
-Make the SDK in `sdk/` even more powerful with new methods, better TypeScript support, or killer integration examples.
+New methods, better TypeScript support, integration examples in `sdk/`.
 
-### 💻 **CLI Magic**
+### 💻 **CLI**
 
-Enhance the user experience in `npm-app/` with smoother commands, better error messages, or interactive features that make developers smile.
+Improve `cli/`: better commands, error messages, interactive features.
 
 ### 🌐 **Web Dashboard**
 
-Level up the web interface in `web/` with better agent management, project templates, analytics, or any UX improvements you can dream up.
+Improve `web/`: agent management, project templates, analytics.
 
 ## Getting Help
 
 **Setup issues?**
 
-- **direnv problems?** Make sure it's hooked into your shell, run `direnv allow`, and restart your terminal
 - **Script errors?** Double-check you're using bun for all commands
-- **Infisical issues?** See our [Infisical Setup Guide](./INFISICAL_SETUP_GUIDE.md) for step-by-step instructions
 - **Database connection errors?** If you see `password authentication failed for user "postgres"` errors:
-  1. Ensure DATABASE_URL uses the correct credentials: `postgresql://manicode_user_local:secretpassword_local@localhost:5432/manicode_db_local`
-  2. Update both your local `.env` file and Infisical secret: `infisical secrets set DATABASE_URL=postgresql://manicode_user_local:secretpassword_local@localhost:5432/manicode_db_local`
-  3. Run the database migration: `infisical run -- bun run db:migrate`
-  4. Restart your development services
+  1. Ensure DATABASE_URL in `.env.local` uses the correct credentials: `postgresql://manicode_user_local:secretpassword_local@localhost:5432/manicode_db_local`
+  2. Run the database migration: `bun run db:migrate`
+  3. Restart your development services
+- **Using Infisical?** See the [Infisical Setup Guide](./INFISICAL_SETUP_GUIDE.md) for team secrets management
 - **Empty Agent Store in dev mode?** This is expected behavior - agents from `.agents/` directory need to be published to the database to appear in the marketplace
 
 **Questions?** Jump into our [Discord community](https://codebuff.com/discord) - we're friendly and always happy to help!

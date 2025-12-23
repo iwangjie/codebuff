@@ -1,5 +1,6 @@
 import { handleAddMessage } from './tool/add-message'
 import { handleAddSubgoal } from './tool/add-subgoal'
+import { handleAskUser } from './tool/ask-user'
 import { handleBrowserLogs } from './tool/browser-logs'
 import { handleCodeSearch } from './tool/code-search'
 import { handleCreatePlan } from './tool/create-plan'
@@ -8,6 +9,8 @@ import { handleFindFiles } from './tool/find-files'
 import { handleGlob } from './tool/glob'
 import { handleListDirectory } from './tool/list-directory'
 import { handleLookupAgentInfo } from './tool/lookup-agent-info'
+import { handleProposeStrReplace } from './tool/propose-str-replace'
+import { handleProposeWriteFile } from './tool/propose-write-file'
 import { handleReadDocs } from './tool/read-docs'
 import { handleReadFiles } from './tool/read-files'
 import { handleReadSubtree } from './tool/read-subtree'
@@ -18,6 +21,7 @@ import { handleSetOutput } from './tool/set-output'
 import { handleSpawnAgentInline } from './tool/spawn-agent-inline'
 import { handleSpawnAgents } from './tool/spawn-agents'
 import { handleStrReplace } from './tool/str-replace'
+import { handleSuggestFollowups } from './tool/suggest-followups'
 import { handleTaskCompleted } from './tool/task-completed'
 import { handleThinkDeeply } from './tool/think-deeply'
 import { handleUpdateSubgoal } from './tool/update-subgoal'
@@ -40,6 +44,7 @@ import type { ToolName } from '@codebuff/common/tools/constants'
 export const codebuffToolHandlers = {
   add_message: handleAddMessage,
   add_subgoal: handleAddSubgoal,
+  ask_user: handleAskUser,
   browser_logs: handleBrowserLogs,
   code_search: handleCodeSearch,
   create_plan: handleCreatePlan,
@@ -48,6 +53,8 @@ export const codebuffToolHandlers = {
   glob: handleGlob,
   list_directory: handleListDirectory,
   lookup_agent_info: handleLookupAgentInfo,
+  propose_str_replace: handleProposeStrReplace,
+  propose_write_file: handleProposeWriteFile,
   read_docs: handleReadDocs,
   read_files: handleReadFiles,
   read_subtree: handleReadSubtree,
@@ -58,6 +65,7 @@ export const codebuffToolHandlers = {
   spawn_agents: handleSpawnAgents,
   spawn_agent_inline: handleSpawnAgentInline,
   str_replace: handleStrReplace,
+  suggest_followups: handleSuggestFollowups,
   task_completed: handleTaskCompleted,
   think_deeply: handleThinkDeeply,
   update_subgoal: handleUpdateSubgoal,

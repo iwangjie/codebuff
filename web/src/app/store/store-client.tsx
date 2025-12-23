@@ -3,6 +3,7 @@
 import { useMemo, useCallback, memo, useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSession } from 'next-auth/react'
+import { useRouter } from 'next/navigation'
 import {
   Search,
   TrendingUp,
@@ -99,11 +100,11 @@ interface AgentStoreClientProps {
 
 // Hard-coded list of editor's choice agents
 const EDITORS_CHOICE_AGENTS = [
-  'base',
-  'base-lite',
-  'base-max',
+  'base2',
+  'base2-lite',
+  'base2-max',
+  'base2-plan',
   'deep-code-reviewer',
-  'find-food',
   'landing-page-generator',
 ]
 
@@ -127,6 +128,7 @@ export default function AgentStoreClient({
   session: initialSession,
   searchParams,
 }: AgentStoreClientProps) {
+  const router = useRouter()
   // Use client-side session for authentication state, but don't block rendering
   const { data: clientSession, status: sessionStatus } = useSession()
   const session = clientSession || initialSession
@@ -150,6 +152,18 @@ export default function AgentStoreClient({
 
   // Local state for immediate input feedback
   const [localSearchQuery, setLocalSearchQuery] = useState(searchQuery)
+
+  const prefetchedRoutes = useRef<Set<string>>(new Set())
+  const prefetchRoute = useCallback(
+    (href: string) => {
+      if (prefetchedRoutes.current.has(href)) {
+        return
+      }
+      prefetchedRoutes.current.add(href)
+      router.prefetch(href)
+    },
+    [router],
+  )
 
   const observerRef = useRef<IntersectionObserver | null>(null)
   const loadMoreRef = useRef<HTMLDivElement>(null)
@@ -185,17 +199,31 @@ export default function AgentStoreClient({
     loadingStateRef.current = { isLoadingMore, hasMore }
   }, [isLoadingMore, hasMore])
 
-  // Use the initial agents directly
+  // Hydrate agents client-side if SSR provided none (build-time fallback)
+  const { data: hydratedAgents } = useQuery<AgentData[]>({
+    queryKey: ['agents'],
+    queryFn: async () => {
+      const response = await fetch('/api/agents')
+      if (!response.ok) {
+        throw new Error(`Failed to fetch agents: ${response.statusText}`)
+      }
+      return response.json()
+    },
+    enabled: (initialAgents?.length ?? 0) === 0,
+    staleTime: 600000, // 10 minutes
+  })
+
+  // Prefer hydrated data if present; else use SSR data
   const agents = useMemo(() => {
-    return initialAgents
-  }, [initialAgents])
+    return hydratedAgents ?? initialAgents
+  }, [hydratedAgents, initialAgents])
 
   const editorsChoice = useMemo(() => {
     return agents.filter((agent) => EDITORS_CHOICE_AGENTS.includes(agent.id))
   }, [agents])
 
   const filteredAndSortedAgents = useMemo(() => {
-    let filtered = agents.filter((agent) => {
+    const filtered = agents.filter((agent) => {
       const matchesSearch =
         agent.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         agent.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -367,16 +395,21 @@ export default function AgentStoreClient({
     }
   }
 
-  const AgentCard = memo(
-    ({
-      agent,
-      isEditorsChoice = false,
-    }: {
-      agent: AgentData
-      isEditorsChoice?: boolean
-    }) => (
+  const AgentCard = memo(function AgentCard({
+    agent,
+    isEditorsChoice = false,
+  }: {
+    agent: AgentData
+    isEditorsChoice?: boolean
+  }) {
+    const href = `/publishers/${agent.publisher.id}/agents/${agent.id}/${agent.version || '1.0.0'}`
+    return (
       <Link
-        href={`/publishers/${agent.publisher.id}/agents/${agent.id}/${agent.version || '1.0.0'}`}
+        href={href}
+        prefetch={false}
+        onMouseEnter={() => prefetchRoute(href)}
+        onFocus={() => prefetchRoute(href)}
+        onTouchStart={() => prefetchRoute(href)}
         className="block group"
       >
         <Card
@@ -526,8 +559,8 @@ export default function AgentStoreClient({
           </CardContent>
         </Card>
       </Link>
-    ),
-  )
+    )
+  })
 
   return (
     <div className="container mx-auto py-8 px-4" style={{ cursor: 'default' }}>

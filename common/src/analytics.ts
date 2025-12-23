@@ -1,23 +1,69 @@
-import { PostHog } from 'posthog-node'
-
-import { env } from '@codebuff/common/env'
+import {
+  createPostHogClient,
+  getConfigFromEnv,
+  isProdEnv,
+  type AnalyticsClient,
+  type AnalyticsConfig,
+  type PostHogClientOptions,
+} from './analytics-core'
 
 import type { AnalyticsEvent } from './constants/analytics-events'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 
-let client: PostHog | undefined
+// Re-export types from core for backwards compatibility
+export type { AnalyticsClient, AnalyticsConfig } from './analytics-core'
 
-export function initAnalytics({ logger }: { logger: Logger }) {
-  if (!env.NEXT_PUBLIC_POSTHOG_API_KEY || !env.NEXT_PUBLIC_POSTHOG_HOST_URL) {
-    logger.warn(
-      'Analytics environment variables not set - analytics will be disabled',
-    )
+/** Dependencies that can be injected for testing */
+export interface ServerAnalyticsDeps {
+  createClient: (apiKey: string, options: PostHogClientOptions) => AnalyticsClient
+}
+
+let client: AnalyticsClient | undefined
+let analyticsConfig: AnalyticsConfig | null = null
+let injectedDeps: ServerAnalyticsDeps | undefined
+
+/** Get client factory (injected or default PostHog) */
+function getCreateClient() {
+  return injectedDeps?.createClient ?? createPostHogClient
+}
+
+/** Reset analytics state - for testing only */
+export function resetServerAnalyticsState(deps?: ServerAnalyticsDeps) {
+  client = undefined
+  analyticsConfig = null
+  injectedDeps = deps
+}
+
+/** Get current config - exposed for testing */
+export function getAnalyticsConfig() {
+  return analyticsConfig
+}
+
+export const configureAnalytics = (config: AnalyticsConfig | null) => {
+  analyticsConfig = config
+  client = undefined
+}
+
+export function initAnalytics({
+  logger,
+  clientEnv,
+}: {
+  logger: Logger
+  clientEnv?: Parameters<typeof getConfigFromEnv>[0]
+}) {
+  if (clientEnv) {
+    configureAnalytics(getConfigFromEnv(clientEnv))
+  }
+
+  if (!isProdEnv(analyticsConfig?.envName)) {
     return
   }
 
+  const createClient = getCreateClient()
+
   try {
-    client = new PostHog(env.NEXT_PUBLIC_POSTHOG_API_KEY, {
-      host: env.NEXT_PUBLIC_POSTHOG_HOST_URL,
+    client = createClient(analyticsConfig!.posthogApiKey, {
+      host: analyticsConfig!.posthogHostUrl,
       flushAt: 1,
       flushInterval: 0,
     })
@@ -26,13 +72,16 @@ export function initAnalytics({ logger }: { logger: Logger }) {
   }
 }
 
-export async function flushAnalytics() {
+export async function flushAnalytics(logger?: Logger) {
   if (!client) {
     return
   }
   try {
     await client.flush()
-  } catch (error) {}
+  } catch (error) {
+    // Log the error but don't throw - flushing is best-effort
+    logger?.warn({ error }, 'Failed to flush analytics')
+  }
 }
 
 export function trackEvent({
@@ -46,21 +95,20 @@ export function trackEvent({
   properties?: Record<string, any>
   logger: Logger
 }) {
-  if (env.NEXT_PUBLIC_CB_ENVIRONMENT !== 'prod') {
+  if (!isProdEnv(analyticsConfig?.envName)) {
     // Note (James): This log was too noisy. Reenable it as you need to test something.
     // logger.info({ payload: { event, properties } }, event)
     return
   }
 
   if (!client) {
-    initAnalytics({ logger })
-    if (!client) {
-      logger.warn(
-        { event, userId },
-        'Analytics client not initialized, skipping event tracking',
-      )
-      return
-    }
+    // Don't attempt to re-initialize here - initAnalytics requires clientEnv
+    // which we don't have in this context. Just warn and skip.
+    logger.warn(
+      { event, userId },
+      'Analytics client not initialized, skipping event tracking',
+    )
+    return
   }
 
   try {

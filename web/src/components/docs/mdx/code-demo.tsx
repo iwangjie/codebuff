@@ -153,14 +153,30 @@ export function CodeDemo({ children, language, rawContent }: CodeDemoProps) {
     // Use rawContent if available (from remark plugin), otherwise fall back to processing children
     const content = rawContent || getContent(children)
     return trimLeadingWhitespace(content)
-  }, [children, language, rawContent])
+  }, [children, rawContent])
 
   // Check if this is a mermaid diagram
   const isMermaid = language?.toLowerCase() === 'mermaid'
 
+  // Normalize language and get theme/color - must be called unconditionally
+  const {
+    normalizedLanguage,
+    theme: highlightTheme,
+    tokenColor,
+  } = useMemo(() => {
+    const normalized = language.toLowerCase().trim()
+    const normalizedLang = languageMap[normalized] || normalized
+    const { theme, tokenColor } = getLanguageTheme(normalizedLang)
+    return {
+      normalizedLanguage: normalizedLang,
+      theme,
+      tokenColor,
+    }
+  }, [language])
+
   if (isMermaid) {
     return (
-      <div className="rounded-lg border bg-muted/30 px-4 w-full max-w-80 md:max-w-full my-3 transition-all group hover:bg-muted/40 overflow-hidden">
+      <div className="rounded-lg border bg-muted/30 px-4 w-full my-3 transition-all group hover:bg-muted/40 overflow-hidden">
         <div className="flex items-center justify-between h-6 mt-0.5 mb-0.5">
           <div className="text-[10px] text-muted-foreground/40 font-mono tracking-wide">
             mermaid diagram
@@ -185,24 +201,8 @@ export function CodeDemo({ children, language, rawContent }: CodeDemoProps) {
     )
   }
 
-  // Normalize language and get theme/color in one useMemo
-  const {
-    normalizedLanguage,
-    theme: highlightTheme,
-    tokenColor,
-  } = useMemo(() => {
-    const normalized = language.toLowerCase().trim()
-    const normalizedLang = languageMap[normalized] || normalized
-    const { theme, tokenColor } = getLanguageTheme(normalizedLang)
-    return {
-      normalizedLanguage: normalizedLang,
-      theme,
-      tokenColor,
-    }
-  }, [language])
-
   return (
-    <div className="rounded-lg border px-4 w-full max-w-80 md:max-w-full my-3 transition-all group overflow-x-auto">
+    <div className="rounded-lg border px-4 w-full my-3 transition-all group overflow-x-auto">
       <div className="flex items-center justify-between h-6 mt-0.5 mb-0.5">
         <div className="text-[10px] text-muted-foreground/40 font-mono tracking-wide">
           {language.toLowerCase()}
@@ -236,26 +236,31 @@ export function CodeDemo({ children, language, rawContent }: CodeDemoProps) {
                   color: tokenColor || style.color,
                 }}
               >
-                {tokens.map((line, i) => (
-                  <div key={i} {...getLineProps({ line })}>
-                    {line.map((token, key) => {
-                      const tokenProps = getTokenProps({ token, key })
-                      // Override colors for special languages in render loop
-                      const color = tokenColor || tokenProps.style?.color
+                {tokens.map((line, i) => {
+                  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                  const { key: _lineKey, ...lineProps } = getLineProps({ line })
+                  return (
+                    <div key={i} {...lineProps}>
+                      {line.map((token, tokenIndex) => {
+                        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                        const { key: _tokenKey, ...tokenProps } = getTokenProps({ token, key: tokenIndex })
+                        // Override colors for special languages in render loop
+                        const color = tokenColor || tokenProps.style?.color
 
-                      return (
-                        <span
-                          key={key}
-                          {...tokenProps}
-                          style={{
-                            ...tokenProps.style,
-                            color,
-                          }}
-                        />
-                      )
-                    })}
-                  </div>
-                ))}
+                        return (
+                          <span
+                            key={tokenIndex}
+                            {...tokenProps}
+                            style={{
+                              ...tokenProps.style,
+                              color,
+                            }}
+                          />
+                        )
+                      })}
+                    </div>
+                  )
+                })}
               </pre>
             )
           }}

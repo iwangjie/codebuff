@@ -1,15 +1,12 @@
 import { AgentTemplateTypes } from '@codebuff/common/types/session-state'
-import { generateCompactId } from '@codebuff/common/util/string'
 import { uniq } from 'lodash'
 
-import { checkTerminalCommand } from './check-terminal-command'
 import { checkLiveUserInput } from './live-user-inputs'
 import { loopAgentSteps } from './run-agent-step'
 import {
   assembleLocalAgentTemplates,
   getAgentTemplate,
 } from './templates/agent-registry'
-import { expireMessages } from './util/messages'
 
 import type { AgentTemplate } from './templates/types'
 import type { ClientAction } from '@codebuff/common/actions'
@@ -47,11 +44,8 @@ export async function mainPrompt(
     | 'agentType'
     | 'fingerprintId'
     | 'fileContext'
+    | 'ancestorRunIds'
   > &
-    ParamsExcluding<
-      typeof checkTerminalCommand,
-      'prompt' | 'fingerprintId' | 'userInputId'
-    > &
     ParamsExcluding<typeof getAgentTemplate, 'agentId'>,
 ): Promise<{
   sessionState: SessionState
@@ -73,7 +67,7 @@ export async function mainPrompt(
 
   const availableAgents = Object.keys(localAgentTemplates)
 
-  // Determine agent type - prioritize CLI agent selection, then config base agent, then cost mode
+  // Determine agent type - prioritize CLI agent selection, then cost mode
   let agentType: AgentTemplateType
 
   if (agentId) {
@@ -93,40 +87,15 @@ export async function mainPrompt(
       `Using CLI-specified agent: ${agentId}`,
     )
   } else {
-    // Check for base agent in config
-    const configBaseAgent = fileContext.codebuffConfig?.baseAgent
-    if (configBaseAgent) {
-      if (
-        !(await getAgentTemplate({
-          ...params,
-          agentId: configBaseAgent,
-        }))
-      ) {
-        throw new Error(
-          `Invalid base agent in config: "${configBaseAgent}". Available agents: ${availableAgents.join(', ')}`,
-        )
-      }
-      agentType = configBaseAgent
-      logger.info(
-        {
-          configBaseAgent,
-          promptParams,
-          prompt: prompt?.slice(0, 50),
-        },
-        `Using config-specified base agent: ${configBaseAgent}`,
-      )
-    } else {
-      // Fall back to cost mode mapping
-      agentType = (
-        {
-          ask: AgentTemplateTypes.ask,
-          lite: AgentTemplateTypes.base_lite,
-          normal: AgentTemplateTypes.base,
-          max: AgentTemplateTypes.base_max,
-          experimental: 'base2',
-        } satisfies Record<CostMode, AgentTemplateType>
-      )[costMode]
-    }
+    agentType = (
+      {
+        ask: AgentTemplateTypes.ask,
+        lite: AgentTemplateTypes.base_lite,
+        normal: AgentTemplateTypes.base,
+        max: AgentTemplateTypes.base_max,
+        experimental: 'base2',
+      } satisfies Record<CostMode, AgentTemplateType>
+    )[costMode ?? 'normal']
   }
 
   mainAgentState.agentType = agentType
@@ -139,94 +108,19 @@ export async function mainPrompt(
     throw new Error(`Agent template not found for type: ${agentType}`)
   }
 
-  let updatedSubagents = mainAgentTemplate.spawnableAgents
-  if (!agentId) {
-    // If --agent is not specified, use the spawnableAgents from the codebuff config or add all local agents
-    const {
-      spawnableAgents,
-      addedSpawnableAgents = [],
-      removedSpawnableAgents = [],
-    } = fileContext.codebuffConfig ?? {}
-    updatedSubagents =
-      spawnableAgents ??
-      uniq([...mainAgentTemplate.spawnableAgents, ...availableAgents])
-
-    updatedSubagents = uniq([
-      ...updatedSubagents,
-      ...addedSpawnableAgents,
-    ]).filter((subagent) => !removedSpawnableAgents.includes(subagent))
-  }
+  const updatedSubagents = uniq([
+    ...mainAgentTemplate.spawnableAgents,
+    ...availableAgents,
+  ])
   mainAgentTemplate.spawnableAgents = updatedSubagents
   localAgentTemplates[agentType] = mainAgentTemplate
 
-  // TODO (fat sdk): remove this once we switch to sdk-only
-  if (
-    prompt &&
-    mainAgentTemplate.toolNames.includes('run_terminal_command') &&
-    !fingerprintId.startsWith('codebuff-sdk-')
-  ) {
-    // Check if this is a direct terminal command
-    const startTime = Date.now()
-    const terminalCommand = await checkTerminalCommand({
-      ...params,
-      prompt,
-      fingerprintId,
-      userInputId: promptId,
-    })
-    const duration = Date.now() - startTime
-
-    if (terminalCommand) {
-      logger.debug(
-        {
-          duration,
-          prompt,
-        },
-        `Detected terminal command in ${duration}ms, executing directly: ${prompt}`,
-      )
-
-      const { output } = await requestToolCall({
-        userInputId: promptId,
-        toolName: 'run_terminal_command',
-        input: {
-          command: terminalCommand,
-          mode: 'user',
-          process_type: 'SYNC',
-          timeout_seconds: -1,
-        },
-      })
-
-      mainAgentState.messageHistory.push({
-        role: 'tool',
-        content: {
-          type: 'tool-result',
-          toolName: 'run_terminal_command',
-          toolCallId: generateCompactId(),
-          output: output,
-        },
-      })
-
-      const newSessionState = {
-        ...sessionState,
-        messageHistory: expireMessages(
-          mainAgentState.messageHistory,
-          'userPrompt',
-        ),
-      }
-
-      return {
-        sessionState: newSessionState,
-        output: {
-          type: 'lastMessage',
-          value: output,
-        },
-      }
-    }
-  }
   const { agentState, output } = await loopAgentSteps({
     ...params,
     userInputId: promptId,
     spawnParams: promptParams,
     agentState: mainAgentState,
+    ancestorRunIds: [],
     prompt,
     content,
     agentType,
@@ -267,6 +161,14 @@ export async function callMainPrompt(
   // The server controls cost tracking, clients cannot manipulate this value
   action.sessionState.mainAgentState.creditsUsed = 0
   action.sessionState.mainAgentState.directCreditsUsed = 0
+
+  // Add any extra tool results (e.g. from user-executed terminal commands) to message history
+  // This allows the AI to see context from commands run between prompts
+  if (action.toolResults && action.toolResults.length > 0) {
+    action.sessionState.mainAgentState.messageHistory.push(
+      ...action.toolResults,
+    )
+  }
 
   // Assemble local agent templates from fileContext
   const { agentTemplates: localAgentTemplates, validationErrors } =

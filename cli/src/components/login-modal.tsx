@@ -1,6 +1,6 @@
 import { useRenderer } from '@opentui/react'
 import open from 'open'
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 
 import { TerminalLink } from './terminal-link'
 import { useLoginMutation } from '../hooks/use-auth-query'
@@ -10,17 +10,11 @@ import { useLoginPolling } from '../hooks/use-login-polling'
 import { useLogo } from '../hooks/use-logo'
 import { useSheenAnimation } from '../hooks/use-sheen-animation'
 import { useTheme } from '../hooks/use-theme'
-import {
-  DEFAULT_TERMINAL_HEIGHT,
-  MODAL_VERTICAL_MARGIN,
-  MAX_MODAL_BASE_HEIGHT,
-  WARNING_BANNER_HEIGHT,
-} from '../login/constants'
+import { getLogoBlockColor, getLogoAccentColor } from '../utils/theme-system'
 import {
   formatUrl,
   generateFingerprintId,
   calculateResponsiveLayout,
-  calculateModalDimensions,
 } from '../login/utils'
 import { useLoginStore } from '../state/login-store'
 import { copyTextToClipboard } from '../utils/clipboard'
@@ -148,13 +142,6 @@ export const LoginModal = ({
   const handleLoginSuccess = useCallback((user: User) => {
     loginMutationRef.current.mutate(user, {
       onSuccess: (validatedUser) => {
-        logger.info(
-          {
-            user: validatedUser.name,
-            validatedFields: Object.keys(validatedUser),
-          },
-          '✅ Login mutation succeeded, notifying parent',
-        )
         onLoginSuccessRef.current(validatedUser)
       },
       onError: (error) => {
@@ -248,8 +235,12 @@ export const LoginModal = ({
   }, [loginUrl, copyToClipboard])
 
   // Use custom hook for sheen animation
+  const blockColor = getLogoBlockColor(theme.name)
+  const accentColor = getLogoAccentColor(theme.name)
   const { applySheenToChar } = useSheenAnimation({
     logoColor: theme.foreground,
+    accentColor,
+    blockColor,
     terminalWidth: renderer?.width,
     sheenPosition,
     setSheenPosition,
@@ -262,48 +253,24 @@ export const LoginModal = ({
     textColor: theme.foreground,
   })
 
-  // Calculate modal dimensions
-  const { modalHeight } = calculateModalDimensions(
-    terminalHeight,
-    !!hasInvalidCredentials,
-    DEFAULT_TERMINAL_HEIGHT,
-    MODAL_VERTICAL_MARGIN,
-    MAX_MODAL_BASE_HEIGHT,
-    WARNING_BANNER_HEIGHT,
-  )
-
-  // Calculate modal width and center position
-  const modalWidth = Math.floor(terminalWidth * 0.95)
-  const modalLeft = Math.floor((terminalWidth - modalWidth) / 2)
-  const modalTop = Math.floor((terminalHeight - modalHeight) / 2)
-
   // Format URL for display (wrap if needed)
   return (
     <box
-      position="absolute"
-      left={modalLeft}
-      top={modalTop}
-      border
-      borderStyle="double"
-      borderColor={theme.primary}
       style={{
-        width: modalWidth,
-        height: modalHeight,
-        maxHeight: modalHeight,
-        backgroundColor: theme.background,
+        width: '100%',
+        height: '100%',
+        backgroundColor: theme.surface,
         padding: 0,
         flexDirection: 'column',
       }}
     >
-      {/* Sticky banner at top - outside scrollbox */}
+      {/* Sticky banner at top */}
       {hasInvalidCredentials && (
         <box
           style={{
             width: '100%',
             padding: 1,
-            backgroundColor: theme.error,
-            borderStyle: 'single',
-            borderColor: theme.error,
+            backgroundColor: theme.surface,
             flexShrink: 0,
           }}
         >
@@ -321,9 +288,9 @@ export const LoginModal = ({
         style={{
           flexDirection: 'column',
           alignItems: 'center',
+          justifyContent: 'center',
           width: '100%',
           height: '100%',
-          backgroundColor: theme.background,
           padding: containerPadding,
           gap: 0,
         }}
@@ -395,10 +362,10 @@ export const LoginModal = ({
             }}
           >
             <text style={{ wrapMode: 'word' }}>
-              <span fg={theme.primary}>
+              <span fg={'#00cc00'}>
                 {isNarrow
                   ? 'Press ENTER to login...'
-                  : 'Press ENTER to open your browser and finish logging in...'}
+                  : 'Press ENTER to open your browser and login...'}
               </span>
             </text>
           </box>
@@ -432,7 +399,7 @@ export const LoginModal = ({
                 text={loginUrl}
                 maxWidth={maxUrlWidth}
                 formatLines={formatLoginUrlLines}
-                color={hasClickedLink ? theme.success : theme.info}
+                color={hasClickedLink ? theme.success : theme.link}
                 activeColor={theme.success}
                 underlineOnHover={true}
                 isActive={justCopied}
@@ -456,9 +423,7 @@ export const LoginModal = ({
                 <text style={{ wrapMode: 'none' }}>
                   <span
                     fg={
-                      copyMessage.startsWith('✓')
-                        ? theme.success
-                        : theme.error
+                      copyMessage.startsWith('✓') ? theme.success : theme.error
                     }
                   >
                     {copyMessage}

@@ -10,8 +10,8 @@ import type { NextRequest } from 'next/server'
 import { authOptions } from '@/app/api/auth/[...nextauth]/auth-options'
 import { siteConfig } from '@/lib/constant'
 
-function getCurrentSessionTokenFromCookies(): string | null {
-  const jar = cookies()
+async function getCurrentSessionTokenFromCookies(): Promise<string | null> {
+  const jar = await cookies()
   // NextAuth may use one of these cookie names depending on secure context
   const names = ['next-auth.session-token', '__Secure-next-auth.session-token']
   for (const name of names) {
@@ -28,7 +28,9 @@ function isSameOrigin(request: NextRequest) {
     const referer = request.headers.get('referer')
     if (origin && new URL(origin).origin === base) return true
     if (referer && new URL(referer).origin === base) return true
-  } catch {}
+  } catch {
+    // Ignore URL parsing errors
+  }
   return false
 }
 
@@ -39,10 +41,13 @@ export async function POST(request: NextRequest) {
   }
 
   if (!isSameOrigin(request)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    return NextResponse.json(
+      { error: 'Forbidden - not same origin, cannot logout all sessions' },
+      { status: 403 },
+    )
   }
 
-  const currentToken = getCurrentSessionTokenFromCookies()
+  const currentToken = await getCurrentSessionTokenFromCookies()
 
   if (currentToken) {
     await db.delete(schema.session).where(

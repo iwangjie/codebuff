@@ -1,7 +1,9 @@
 import { TextAttributes } from '@opentui/core'
 import React, { type ReactNode } from 'react'
+import stringWidth from 'string-width'
 
 import { useTheme } from '../../hooks/use-theme'
+import { Button } from '../button'
 
 import type { ChatTheme } from '../../types/theme-system'
 
@@ -10,11 +12,11 @@ interface ToolCallItemProps {
   content: ReactNode
   isCollapsed: boolean
   isStreaming: boolean
-  branchChar: string
   streamingPreview: string
   finishedPreview: string
   onToggle?: () => void
   titleSuffix?: string
+  dense?: boolean
 }
 
 const isTextRenderable = (value: ReactNode): boolean => {
@@ -122,25 +124,25 @@ const renderExpandedContent = (
 interface SimpleToolCallItemProps {
   name: string
   description: string
-  branchChar: string
+  descriptionColor?: string
 }
 
 export const SimpleToolCallItem = ({
   name,
   description,
-  branchChar,
+  descriptionColor,
 }: SimpleToolCallItemProps) => {
   const theme = useTheme()
   const bulletChar = '• '
 
   return (
     <box style={{ flexDirection: 'row', alignItems: 'center', width: '100%' }}>
-      <text style={{ wrapMode: 'none' }}>
-        <span fg={theme.foreground}>{branchChar || bulletChar}</span>
+      <text style={{ wrapMode: 'word' }}>
+        <span fg={theme.foreground}>{bulletChar}</span>
         <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
           {name}
         </span>
-        <span fg={theme.foreground}> {description}</span>
+        <span fg={descriptionColor ?? theme.foreground}> {description}</span>
       </text>
     </box>
   )
@@ -151,11 +153,11 @@ export const ToolCallItem = ({
   content,
   isCollapsed,
   isStreaming,
-  branchChar,
   streamingPreview,
   finishedPreview,
   onToggle,
   titleSuffix,
+  dense = false,
 }: ToolCallItemProps) => {
   const theme = useTheme()
 
@@ -166,8 +168,12 @@ export const ToolCallItem = ({
   }
 
   const isExpanded = !isCollapsed
+  const bulletChar = '• '
   const toggleIndicator = onToggle ? (isCollapsed ? '▸ ' : '▾ ') : ''
-  const toggleLabel = `${branchChar}${toggleIndicator}`
+  const toggleLabel = onToggle ? toggleIndicator : bulletChar
+  // Width in cells of the toggle label (toggle arrow or bullet). Used to align
+  // expanded content directly under the toggle icon.
+  const toggleIndent = stringWidth(toggleLabel)
   const collapsedPreviewText = isStreaming ? streamingPreview : finishedPreview
   const showCollapsedPreview = collapsedPreviewText.length > 0
 
@@ -184,17 +190,17 @@ export const ToolCallItem = ({
           width: '100%',
         }}
       >
-        <box
+        <Button
           style={{
             flexDirection: 'row',
             alignItems: 'center',
             paddingLeft: 0,
             paddingRight: 0,
             paddingTop: 0,
-            paddingBottom: isCollapsed ? 0 : 1,
+            paddingBottom: 0,
             width: '100%',
           }}
-          onMouseDown={onToggle}
+          onClick={onToggle}
         >
           <text style={{ wrapMode: 'none' }}>
             <span
@@ -217,7 +223,7 @@ export const ToolCallItem = ({
               </span>
             ) : null}
           </text>
-        </box>
+        </Button>
 
         {isCollapsed ? (
           showCollapsedPreview ? (
@@ -242,8 +248,9 @@ export const ToolCallItem = ({
             style={{
               flexDirection: 'column',
               gap: 0,
-              paddingLeft: 0,
-              paddingRight: 0,
+              // Indent expanded content underneath the toggle icon
+              paddingLeft: toggleIndent,
+              paddingRight: dense ? 0 : toggleIndent,
               paddingTop: 0,
               paddingBottom: 0,
             }}

@@ -1,6 +1,7 @@
 import { useRenderer } from '@opentui/react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
+import { CURSOR_CHAR } from '../components/multiline-input'
 import {
   copyTextToClipboard,
   subscribeClipboardMessages,
@@ -17,16 +18,15 @@ function formatDefaultClipboardMessage(text: string): string | null {
 
 export const useClipboard = () => {
   const renderer = useRenderer()
-  const [clipboardMessage, setClipboardMessage] = useState<string | null>(null)
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const pendingCopyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   )
-  const copyDelayRef = useRef<number>(2000)
   const pendingSelectionRef = useRef<string | null>(null)
   const lastCopiedRef = useRef<string | null>(null)
 
   useEffect(() => {
-    return subscribeClipboardMessages(setClipboardMessage)
+    return subscribeClipboardMessages(setStatusMessage)
   }, [])
 
   useEffect(() => {
@@ -38,7 +38,10 @@ export const useClipboard = () => {
           ? selectionObj
           : null
 
-      if (!rawText || rawText.trim().length === 0) {
+      // Filter out cursor character from selected text
+      const cleanedText = rawText?.replace(new RegExp(CURSOR_CHAR, 'g'), '') ?? null
+
+      if (!cleanedText || cleanedText.trim().length === 0) {
         pendingSelectionRef.current = null
         if (pendingCopyTimeoutRef.current) {
           clearTimeout(pendingCopyTimeoutRef.current)
@@ -47,11 +50,11 @@ export const useClipboard = () => {
         return
       }
 
-      if (rawText === pendingSelectionRef.current) {
+      if (cleanedText === pendingSelectionRef.current) {
         return
       }
 
-      pendingSelectionRef.current = rawText
+      pendingSelectionRef.current = cleanedText
 
       if (pendingCopyTimeoutRef.current) {
         clearTimeout(pendingCopyTimeoutRef.current)
@@ -72,7 +75,7 @@ export const useClipboard = () => {
         }).catch(() => {
           // Errors are logged within copyTextToClipboard
         })
-      }, copyDelayRef.current)
+      }, 250)
     }
 
     if (renderer?.on) {
@@ -94,6 +97,6 @@ export const useClipboard = () => {
   }, [])
 
   return {
-    clipboardMessage,
+    statusMessage,
   }
 }

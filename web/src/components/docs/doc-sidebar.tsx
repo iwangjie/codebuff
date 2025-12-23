@@ -2,16 +2,18 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { useEffect, useMemo, useState } from 'react'
+// NEWS DISABLED: Uncomment these imports when re-enabling news
+// import { useEffect, useMemo, useState } from 'react'
 
-import type { NewsArticle } from '@/lib/docs'
-
-import { getDocsByCategory, getNewsArticles } from '@/lib/docs'
+// NEWS DISABLED: Uncomment to re-enable news in sidebar
+// import type { NewsArticle } from '@/lib/docs'
+// import { getDocsByCategory, getNewsArticles } from '@/lib/docs'
+import { getDocsByCategory } from '@/lib/docs'
 import { cn } from '@/lib/utils'
 
-export const sections = [
+const learnSections = [
   {
-    title: 'Intro',
+    title: 'Getting Started',
     href: '/docs/help',
     subsections: getDocsByCategory('help').map((doc) => ({
       title: doc.title,
@@ -20,7 +22,7 @@ export const sections = [
     external: false,
   },
   {
-    title: 'Tips & Tricks',
+    title: 'Using Codebuff',
     href: '/docs/tips',
     subsections: getDocsByCategory('tips').map((doc) => ({
       title: doc.title,
@@ -28,6 +30,9 @@ export const sections = [
     })),
     external: false,
   },
+]
+
+const buildSections = [
   {
     title: 'Agents',
     href: '/docs/agents',
@@ -46,6 +51,9 @@ export const sections = [
     })),
     external: false,
   },
+]
+
+const referenceSections = [
   {
     title: 'Advanced',
     href: '/docs/advanced',
@@ -66,6 +74,9 @@ export const sections = [
   },
 ]
 
+// Flat list of all sections for compatibility with layout.tsx
+export const sections = [...learnSections, ...buildSections, ...referenceSections]
+
 export function DocSidebar({
   className,
   onNavigate,
@@ -74,49 +85,36 @@ export function DocSidebar({
   onNavigate: () => void
 }) {
   const pathname = usePathname()
-  const [newsArticles, setNewsArticles] = useState<NewsArticle[]>([])
-
-  const allSections = useMemo(
-    () => [
-      ...sections,
-      {
-        title: 'News',
-        href: 'https://news.codebuff.com',
-        external: true,
-        subsections: newsArticles,
-      },
-    ],
-    [newsArticles],
-  )
-
-  useEffect(() => {
-    async function fetchNews() {
-      const articles = await getNewsArticles()
-      setNewsArticles(articles)
-    }
-
-    fetchNews()
-  }, [])
-
+  // NEWS DISABLED: Uncomment to re-enable news in sidebar
+  // const [newsArticles, setNewsArticles] = useState<NewsArticle[]>([])
+  // const allSections = useMemo(
+  //   () => [
+  //     ...sections,
+  //     {
+  //       title: 'News',
+  //       href: 'https://news.codebuff.com',
+  //       external: true,
+  //       subsections: newsArticles,
+  //     },
+  //   ],
+  //   [newsArticles],
+  // )
+  // useEffect(() => {
+  //   async function fetchNews() {
+  //     const articles = await getNewsArticles()
+  //     setNewsArticles(articles)
+  //   }
+  //   fetchNews()
+  // }, [])
   return (
-    <nav className={cn('space-y-6', className)}>
-      {allSections.map((section) => (
-        <div key={section.href} className="space-y-2">
-          <Link
-            href={section.href}
-            target={section.external ? '_blank' : undefined}
-            onClick={() => {
-              const sheet = document.querySelector('[data-state="open"]')
-              if (sheet) sheet.setAttribute('data-state', 'closed')
-              onNavigate?.()
-            }}
-            className={cn(
-              'block px-3 py-2 hover:bg-accent rounded-md transition-all text-sm font-medium',
-              pathname === section.href && 'bg-accent text-accent-foreground',
-            )}
+    <nav className={cn('space-y-4', className)}>
+      {sections.map((section) => (
+        <div key={section.href} className="space-y-1">
+          <div
+            className="block px-3 py-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground/60 select-none"
           >
             {section.title}
-          </Link>
+          </div>
           {section.subsections && section.subsections.length > 0 && (
             <div className="ml-4 space-y-1">
               {section.subsections.map((subsection) => (
@@ -125,7 +123,8 @@ export function DocSidebar({
                   href={subsection.href}
                   target={section.external ? '_blank' : undefined}
                   onClick={() => {
-                    const sheet = document.querySelector('[data-state="open"]')
+                    const sheet =
+                      document.querySelector('[data-state="open"]')
                     if (sheet) sheet.setAttribute('data-state', 'closed')
                     onNavigate?.()
                   }}

@@ -2,6 +2,7 @@ import React from 'react'
 
 import { SimpleToolCallItem } from './tool-call-item'
 import { defineToolComponent } from './types'
+import { useTheme } from '../../hooks/use-theme'
 
 import type { ToolRenderConfig } from './types'
 
@@ -12,36 +13,49 @@ import type { ToolRenderConfig } from './types'
  */
 export const ListDirectoryComponent = defineToolComponent({
   toolName: 'list_directory',
-  
-  render(toolBlock, theme, options): ToolRenderConfig | null {
+
+  render(toolBlock): ToolRenderConfig {
     const input = toolBlock.input as any
-    
+
     // Extract directories from input
     let directories: string[] = []
-    
+
     if (Array.isArray(input?.directories)) {
       directories = input.directories
-        .map((dir: any) => typeof dir === 'object' && dir.path ? dir.path : dir)
-        .filter((path: any) => typeof path === 'string' && path.trim().length > 0)
-    } else if (typeof input?.path === 'string' && input.path.trim().length > 0) {
+        .map((dir: any) =>
+          typeof dir === 'object' && dir.path ? dir.path : dir,
+        )
+        .filter(
+          (path: any) => typeof path === 'string' && path.trim().length > 0,
+        )
+    } else if (
+      typeof input?.path === 'string' &&
+      input.path.trim().length > 0
+    ) {
       directories = [input.path.trim()]
     }
-    
+
     if (directories.length === 0) {
-      return null
+      return { content: null }
     }
-    
+
     // Format directory list
     const description = directories.join(', ')
-    
-    return {
-      content: (
+
+    // Use a wrapper component to access theme
+    const ListDirectoryContent = () => {
+      const theme = useTheme()
+      return (
         <SimpleToolCallItem
-          name="List Directories"
+          name="List"
           description={description}
-          branchChar={options.branchChar}
+          descriptionColor={theme.directory}
         />
-      ),
+      )
+    }
+
+    return {
+      content: <ListDirectoryContent />,
     }
   },
 })

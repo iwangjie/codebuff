@@ -51,6 +51,7 @@ export interface MarkdownPalette {
   dividerFg: string
   codeTextFg: string
   codeMonochrome: boolean
+  linkFg: string
 }
 
 export interface MarkdownRenderOptions {
@@ -59,7 +60,7 @@ export interface MarkdownRenderOptions {
 }
 
 const defaultPalette: MarkdownPalette = {
-  inlineCodeFg: 'brightYellow',
+  inlineCodeFg: '#86efac',
   codeBackground: '#0d1117',
   codeHeaderFg: '#666',
   headingFg: {
@@ -76,6 +77,7 @@ const defaultPalette: MarkdownPalette = {
   dividerFg: '#666',
   codeTextFg: 'brightWhite',
   codeMonochrome: false,
+  linkFg: '#3B82F6',
 }
 
 const resolvePalette = (
@@ -131,19 +133,6 @@ const createRenderState = (
       return `markdown-${counter}`
     },
   }
-}
-
-const flattenChildren = (lists: ReactNode[][]): ReactNode[] => {
-  const flattened: ReactNode[] = []
-  for (const list of lists) {
-    for (const item of list) {
-      if (item === null || item === undefined || item === false) {
-        continue
-      }
-      flattened.push(item)
-    }
-  }
-  return flattened
 }
 
 // Unified trim helper with predicate
@@ -630,6 +619,7 @@ const renderInlineCode = (
       key={nextKey()}
       fg={palette.inlineCodeFg}
       bg={palette.codeMonochrome ? undefined : palette.codeBackground}
+      attributes={TextAttributes.BOLD}
     >
       {` ${content} `}
     </span>,
@@ -646,7 +636,7 @@ const renderLink = (link: Link, state: RenderState): ReactNode[] => {
   const label = labelNodes.length > 0 ? labelNodes : [link.url]
 
   return [
-    <span key={nextKey()} fg={palette.inlineCodeFg}>
+    <span key={nextKey()} fg={palette.linkFg}>
       {wrapSegmentsInFragments(label, nextKey())}
     </span>,
   ]

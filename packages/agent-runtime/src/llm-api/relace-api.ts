@@ -1,6 +1,7 @@
 import { models } from '@codebuff/common/old-constants'
 import { buildArray } from '@codebuff/common/util/array'
 import { parseMarkdownCodeBlock } from '@codebuff/common/util/file'
+import { assistantMessage, userMessage } from '@codebuff/common/util/messages'
 
 import type { PromptAiSdkFn } from '@codebuff/common/types/contracts/llm'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
@@ -18,19 +19,19 @@ export async function promptRelaceAI(
   const { initialCode, editSnippet, instructions, promptAiSdk, logger } = params
 
   try {
+    const { tools, ...rest } = params
     // const model = 'relace-apply-2.5-lite'
     const content = await promptAiSdk({
-      ...params,
+      ...rest,
       model: 'relace/relace-apply-3',
       messages: [
-        {
-          role: 'user',
-          content: buildArray(
+        userMessage(
+          buildArray(
             instructions && `<instruction>${instructions}</instruction>`,
             `<code>${initialCode}</code>`,
             `<update>${editSnippet}</update>`,
           ).join('\n'),
-        },
+        ),
       ],
       system: undefined,
       includeCacheControl: false,
@@ -71,10 +72,7 @@ Please output just the complete updated file content with no other text.`
 
     const content = await promptAiSdk({
       ...params,
-      messages: [
-        { role: 'user', content: prompt },
-        { role: 'assistant', content: '```\n' },
-      ],
+      messages: [userMessage(prompt), assistantMessage('```\n')],
       model: models.o3mini,
     })
 

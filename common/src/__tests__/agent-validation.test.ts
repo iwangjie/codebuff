@@ -74,39 +74,6 @@ describe('Agent Validation', () => {
       expect(result.templates.brainstormer.id).toBe('brainstormer')
     })
 
-    test.skip('should validate spawnable agents', async () => {
-      const fileContext: ProjectFileContext = {
-        ...mockFileContext,
-        agentTemplates: {
-          'invalid.ts': {
-            id: 'invalid_agent',
-            version: '1.0.0',
-            displayName: 'Invalid',
-            spawnerPrompt: 'Invalid agent',
-            model: 'anthropic/claude-4-sonnet-20250522',
-            systemPrompt: 'Test',
-            instructionsPrompt: 'Test',
-            stepPrompt: 'Test',
-            spawnableAgents: ['nonexistent_agent'],
-            outputMode: 'last_message',
-            includeMessageHistory: true,
-            inheritParentSystemPrompt: false,
-            toolNames: ['end_turn'],
-          },
-        },
-      }
-
-      const result = validateAgents({
-        agentTemplates: fileContext.agentTemplates || {},
-        logger,
-      })
-
-      expect(result.validationErrors).toHaveLength(1)
-      expect(result.validationErrors[0].message).toContain(
-        'Invalid spawnable agents: nonexistent_agent',
-      )
-    })
-
     it('should merge static and dynamic templates', async () => {
       const fileContext: ProjectFileContext = {
         ...mockFileContext,
@@ -750,7 +717,10 @@ describe('Agent Validation', () => {
       expect(typeof result.templates['test-agent'].handleSteps).toBe('string')
     })
 
-    test('should require set_output tool for handleSteps with json output mode', () => {
+    // Note: The validation that required set_output tool for structured_output mode was
+    // intentionally disabled to allow handleSteps to use set_output while the LLM does not
+    // have access to the set_output tool.
+    test('should allow structured_output mode without set_output tool in toolNames', () => {
       const {
         DynamicAgentTemplateSchema,
       } = require('../types/dynamic-agent-template')
@@ -765,21 +735,20 @@ describe('Agent Validation', () => {
         systemPrompt: 'Test',
         instructionsPrompt: 'Test',
         stepPrompt: 'Test',
-        toolNames: ['end_turn'], // Missing set_output
+        toolNames: ['end_turn'], // Missing set_output - now allowed
         spawnableAgents: [],
         handleSteps:
           'function* () { yield { toolName: "set_output", input: {} } }',
       }
 
       const result = DynamicAgentTemplateSchema.safeParse(agentConfig)
-      expect(result.success).toBe(false)
-      if (!result.success) {
-        const errorMessage = result.error.issues[0]?.message || ''
-        expect(errorMessage).toContain('set_output')
-      }
+      expect(result.success).toBe(true)
     })
 
-    test('should reject set_output tool without json output mode', () => {
+    // Note: The validation that rejected set_output without structured_output mode was
+    // intentionally disabled to allow parent agents to have set_output tool with 'last_message'
+    // outputMode while their subagents use 'structured_output' (preserves prompt caching).
+    test('should allow set_output tool without structured_output mode', () => {
       const {
         DynamicAgentTemplateSchema,
       } = require('../types/dynamic-agent-template')
@@ -791,7 +760,7 @@ describe('Agent Validation', () => {
         spawnerPrompt: 'Testing',
         model: 'claude-3-5-sonnet-20241022',
         outputMode: 'last_message' as const, // Not structured_output
-        toolNames: ['end_turn', 'set_output'], // Has set_output
+        toolNames: ['end_turn', 'set_output'], // Has set_output - now allowed
         spawnableAgents: [],
         systemPrompt: 'Test',
         instructionsPrompt: 'Test',
@@ -799,13 +768,7 @@ describe('Agent Validation', () => {
       }
 
       const result = DynamicAgentTemplateSchema.safeParse(agentConfig)
-      expect(result.success).toBe(false)
-      if (!result.success) {
-        const errorMessage = result.error.issues[0]?.message || ''
-        expect(errorMessage).toContain(
-          "'set_output' tool requires outputMode to be 'structured_output'",
-        )
-      }
+      expect(result.success).toBe(true)
     })
 
     test('should validate that handleSteps is a generator function', async () => {

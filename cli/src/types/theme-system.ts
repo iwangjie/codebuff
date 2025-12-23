@@ -16,6 +16,7 @@ export interface MarkdownThemeOverrides {
   blockquoteTextFg?: string
   dividerFg?: string
   codeMonochrome?: boolean
+  linkFg?: string
 }
 
 /**
@@ -24,6 +25,8 @@ export interface MarkdownThemeOverrides {
  * This makes theming easier and more intuitive
  */
 export interface ChatTheme {
+  /** Theme identifier ('dark' or 'light') */
+  name: ThemeName
   // ============================================================================
   // CORE SEMANTIC COLORS
   // ============================================================================
@@ -43,8 +46,14 @@ export interface ChatTheme {
   /** Warning color - cautions, alerts, validation issues */
   warning: string
 
-  /** Info color - informational elements, links, hints */
+  /** Info color - informational elements, hints */
   info: string
+
+  /** Link color - hyperlinks, clickable references */
+  link: string
+
+  /** Directory color - folder/directory paths */
+  directory: string
 
   // ============================================================================
   // NEUTRAL SCALE
@@ -91,16 +100,8 @@ export interface ChatTheme {
 
   /** Agent content background */
   agentContentBg: string
-
-  // Input specific
-  /** Input background */
-  inputBg: string
-
   /** Input text color */
   inputFg: ThemeColor
-
-  /** Focused input background */
-  inputFocusedBg: string
 
   /** Focused input text color */
   inputFocusedFg: ThemeColor
@@ -123,6 +124,13 @@ export interface ChatTheme {
 
   /** Plan mode toggle text */
   modePlanText: string
+
+  // ============================================================================
+  // IMAGE CARD
+  // ============================================================================
+
+  /** Image card border color */
+  imageCardBorder: string
 
   // ============================================================================
   // MARKDOWN

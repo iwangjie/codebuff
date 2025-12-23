@@ -1,3 +1,5 @@
+import { AGENT_MODES } from '../utils/constants'
+
 export interface SlashCommand {
   id: string
   label: string
@@ -5,102 +7,91 @@ export interface SlashCommand {
   aliases?: string[]
 }
 
+// Generate mode commands from the AGENT_MODES constant
+const MODE_COMMANDS: SlashCommand[] = AGENT_MODES.map((mode) => ({
+  id: `mode:${mode.toLowerCase()}`,
+  label: `mode:${mode.toLowerCase()}`,
+  description: `Switch to ${mode} mode`,
+}))
+
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
     id: 'help',
     label: 'help',
-    description: 'Display help information and available commands',
-    aliases: ['h'],
+    description: 'Display keyboard shortcuts and tips',
+    aliases: ['h', '?'],
   },
   {
     id: 'init',
     label: 'init',
-    description: 'Configure project for better results',
+    description: 'Create a starter knowledge.md file',
   },
   {
     id: 'logout',
-    label: 'logout (signout)',
+    label: 'logout',
     description: 'Sign out of your session',
     aliases: ['signout'],
   },
   {
     id: 'exit',
-    label: 'exit (quit)',
+    label: 'exit',
     description: 'Quit the CLI',
     aliases: ['quit', 'q'],
   },
-  {
-    id: 'diff',
-    label: 'diff',
-    description: 'Show the diff for the last assistant change',
-    aliases: ['d'],
-  },
-  {
-    id: 'undo',
-    label: 'undo',
-    description: 'Undo the last change made by the assistant',
-  },
-  {
-    id: 'redo',
-    label: 'redo',
-    description: 'Redo the most recent undone change',
-  },
-  {
-    id: 'checkpoint',
-    label: 'checkpoint',
-    description: 'Restore the workspace to a specific checkpoint',
-  },
+  // {
+  //   id: 'undo',
+  //   label: 'undo',
+  //   description: 'Undo the last change made by the assistant',
+  // },
+  // {
+  //   id: 'redo',
+  //   label: 'redo',
+  //   description: 'Redo the most recent undone change',
+  // },
+  // {
+  //   id: 'checkpoint',
+  //   label: 'checkpoint',
+  //   description: 'Restore the workspace to a specific checkpoint',
+  // },
   {
     id: 'usage',
-    label: 'usage (credits)',
-    description: 'View remaining or bonus AI credits',
+    label: 'usage',
+    description: 'View remaining or bonus credits',
     aliases: ['credits'],
   },
   {
     id: 'new',
-    label: 'new (reset, clear)',
+    label: 'new',
     description: 'Start a fresh conversation session',
-    aliases: ['reset', 'clear'],
+    aliases: ['n', 'clear', 'c', 'reset'],
   },
   {
-    id: 'compact',
-    label: 'compact',
-    description: 'Summarize conversation history to free context',
+    id: 'feedback',
+    label: 'feedback',
+    description: 'Share general feedback about Codebuff',
   },
   {
-    id: 'export',
-    label: 'export',
-    description: 'Export the current conversation summary to a file',
+    id: 'bash',
+    label: 'bash',
+    description: 'Enter bash mode ("!" at beginning enters bash mode)',
+    aliases: ['!'],
   },
   {
-    id: 'ask',
-    label: 'ask',
-    description: "Switch to ask mode (won't modify code)",
+    id: 'referral',
+    label: 'referral',
+    description: 'Redeem a referral code for bonus credits',
+    aliases: ['redeem'],
   },
   {
-    id: 'lite',
-    label: 'lite',
-    description: 'Switch to lite mode (faster and cheaper)',
+    id: 'image',
+    label: 'image',
+    description: 'Attach an image file (or Ctrl+V to paste from clipboard)',
+    aliases: ['img', 'attach'],
   },
   {
-    id: 'normal',
-    label: 'normal',
-    description: 'Switch to normal mode (balanced behavior)',
+    id: 'publish',
+    label: 'publish',
+    description: 'Publish agents to the agent store',
   },
-  {
-    id: 'max',
-    label: 'max',
-    description: 'Switch to max mode (thorough responses)',
-  },
-  {
-    id: 'trace',
-    label: 'trace (traces)',
-    description: 'Show the trace list or view a specific trace',
-    aliases: ['traces'],
-  },
-  {
-    id: 'agents',
-    label: 'agents',
-    description: 'Manage custom agent templates locally',
-  },
+  ...MODE_COMMANDS,
 ]

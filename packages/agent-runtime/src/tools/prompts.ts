@@ -1,51 +1,68 @@
-import { endsAgentStepParam, toolNames } from '@codebuff/common/tools/constants'
+import { endsAgentStepParam } from '@codebuff/common/tools/constants'
+import { toolParams } from '@codebuff/common/tools/list'
 import { getToolCallString } from '@codebuff/common/tools/utils'
 import { buildArray } from '@codebuff/common/util/array'
 import { pluralize } from '@codebuff/common/util/string'
+import { cloneDeep } from 'lodash'
 import z from 'zod/v4'
-
-import { codebuffToolDefs } from './definitions/list'
+import { convertJsonSchemaToZod } from 'zod-from-json-schema'
 
 import type { ToolName } from '@codebuff/common/tools/constants'
-import type { customToolDefinitionsSchema } from '@codebuff/common/util/file'
-import type { JSONSchema } from 'zod/v4/core'
+import type {
+  CustomToolDefinitions,
+  customToolDefinitionsSchema,
+} from '@codebuff/common/util/file'
+import type { ToolSet } from 'ai'
 
-function paramsSection(params: {
-  schema:
-    | { type: 'zod'; value: z.ZodObject }
-    | { type: 'json'; value: JSONSchema.BaseSchema }
-  endsAgentStep: boolean
-}) {
-  const { schema, endsAgentStep } = params
-  const schemaWithEndsAgentStepParam =
-    schema.type === 'zod'
-      ? z.toJSONSchema(
-          endsAgentStep
-            ? schema.value.extend({
-                [endsAgentStepParam]: z
-                  .literal(endsAgentStep)
-                  .describe('Easp flag must be set to true'),
-              })
-            : schema.value,
-          { io: 'input' },
-        )
-      : JSON.parse(JSON.stringify(schema.value))
-  if (schema.type === 'json') {
-    if (!schemaWithEndsAgentStepParam.properties) {
-      schemaWithEndsAgentStepParam.properties = {}
-    }
-    schemaWithEndsAgentStepParam.properties[endsAgentStepParam] = {
-      const: true,
-      type: 'boolean',
-      description: 'Easp flag must be set to true',
-    }
-    if (!schemaWithEndsAgentStepParam.required) {
-      schemaWithEndsAgentStepParam.required = []
-    }
-    schemaWithEndsAgentStepParam.required.push(endsAgentStepParam)
+/**
+ * Ensures the inputSchema is a Zod schema. If it's a JSON Schema object
+ * (from SDK custom tools that were serialized), converts it to Zod.
+ */
+export function ensureZodSchema(
+  schema: z.ZodType | Record<string, unknown>,
+): z.ZodType {
+  // Check if it's already a Zod schema by looking for the safeParse method
+  if (
+    schema &&
+    typeof (schema as { safeParse?: unknown }).safeParse === 'function'
+  ) {
+    return schema as z.ZodType
   }
+  // JSON Schema object - convert to Zod
+  return convertJsonSchemaToZod(schema as Record<string, unknown>)
+}
 
-  const jsonSchema = schemaWithEndsAgentStepParam
+function ensureJsonSchemaCompatible(schema: z.ZodType): z.ZodType {
+  try {
+    z.toJSONSchema(schema, { io: 'input' })
+    return schema
+  } catch {
+    const fallback = z.object({}).passthrough()
+    return schema.description ? fallback.describe(schema.description) : fallback
+  }
+}
+
+function toJsonSchemaSafe(schema: z.ZodType): Record<string, unknown> {
+  try {
+    return z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>
+  } catch {
+    return { type: 'object', properties: {} }
+  }
+}
+
+function paramsSection(params: { schema: z.ZodType; endsAgentStep: boolean }) {
+  const { schema, endsAgentStep } = params
+  const safeSchema = ensureJsonSchemaCompatible(schema)
+  const schemaWithEndsAgentStepParam = endsAgentStep
+    ? safeSchema.and(
+        z.object({
+          [endsAgentStepParam]: z
+            .literal(endsAgentStep)
+            .describe('Easp flag must be set to true'),
+        }),
+      )
+    : safeSchema
+  const jsonSchema = toJsonSchemaSafe(schemaWithEndsAgentStepParam)
   delete jsonSchema.description
   delete jsonSchema['$schema']
   const paramsDescription = Object.keys(jsonSchema.properties ?? {}).length
@@ -64,9 +81,7 @@ function paramsSection(params: {
 // Helper function to build the full tool description markdown
 export function buildToolDescription(params: {
   toolName: string
-  schema:
-    | { type: 'zod'; value: z.ZodObject }
-    | { type: 'json'; value: JSONSchema.BaseSchema }
+  schema: z.ZodType
   description?: string
   endsAgentStep: boolean
   exampleInputs?: any[]
@@ -89,29 +104,27 @@ export function buildToolDescription(params: {
   ).join('\n\n')
   return buildArray([
     `### ${toolName}`,
-    schema.value.description || '',
+    schema.description || '',
     paramsSection({ schema, endsAgentStep }),
     descriptionWithExamples,
   ]).join('\n\n')
 }
 
 export const toolDescriptions = Object.fromEntries(
-  Object.entries(codebuffToolDefs).map(([name, config]) => [
+  Object.entries(toolParams).map(([name, config]) => [
     name,
     buildToolDescription({
       toolName: name,
-      schema: { type: 'zod', value: config.parameters },
+      schema: config.inputSchema,
       description: config.description,
       endsAgentStep: config.endsAgentStep,
     }),
   ]),
-) as Record<keyof typeof codebuffToolDefs, string>
+) as Record<keyof typeof toolParams, string>
 
 function buildShortToolDescription(params: {
   toolName: string
-  schema:
-    | { type: 'zod'; value: z.ZodObject }
-    | { type: 'json'; value: JSONSchema.BaseSchema }
+  schema: z.ZodType
   endsAgentStep: boolean
 }): string {
   const { toolName, schema, endsAgentStep } = params
@@ -120,7 +133,9 @@ function buildShortToolDescription(params: {
 
 export const getToolsInstructions = (
   tools: readonly string[],
-  additionalToolDefinitions: z.infer<typeof customToolDefinitionsSchema>,
+  additionalToolDefinitions: NonNullable<
+    z.input<typeof customToolDefinitionsSchema>
+  >,
 ) => {
   if (
     tools.length === 0 &&
@@ -202,7 +217,7 @@ ${fullToolList(tools, additionalToolDefinitions)}
 
 export const fullToolList = (
   toolNames: readonly string[],
-  additionalToolDefinitions: z.infer<typeof customToolDefinitionsSchema>,
+  additionalToolDefinitions: CustomToolDefinitions,
 ) => {
   if (
     toolNames.length === 0 &&
@@ -225,9 +240,9 @@ ${[
     const toolDef = additionalToolDefinitions[toolName]
     return buildToolDescription({
       toolName,
-      schema: { type: 'json', value: toolDef.inputJsonSchema },
+      schema: ensureZodSchema(toolDef.inputSchema),
       description: toolDef.description,
-      endsAgentStep: toolDef.endsAgentStep,
+      endsAgentStep: toolDef.endsAgentStep ?? true,
       exampleInputs: toolDef.exampleInputs,
     })
   }),
@@ -236,7 +251,7 @@ ${[
 
 export const getShortToolInstructions = (
   toolNames: readonly string[],
-  additionalToolDefinitions: z.infer<typeof customToolDefinitionsSchema>,
+  additionalToolDefinitions: CustomToolDefinitions,
 ) => {
   if (
     toolNames.length === 0 &&
@@ -245,25 +260,25 @@ export const getShortToolInstructions = (
     return ''
   }
 
-  const toolDescriptions = [
+  const toolDescriptionsList = [
     ...(
       toolNames.filter(
-        (name) => (name as keyof typeof codebuffToolDefs) in codebuffToolDefs,
-      ) as (keyof typeof codebuffToolDefs)[]
+        (name) => (name as keyof typeof toolParams) in toolParams,
+      ) as (keyof typeof toolParams)[]
     ).map((name) => {
-      const tool = codebuffToolDefs[name]
+      const tool = toolParams[name]
       return buildShortToolDescription({
         toolName: name,
-        schema: { type: 'zod', value: tool.parameters },
+        schema: tool.inputSchema,
         endsAgentStep: tool.endsAgentStep,
       })
     }),
     ...Object.keys(additionalToolDefinitions).map((name) => {
-      const { inputJsonSchema, endsAgentStep } = additionalToolDefinitions[name]
+      const { inputSchema, endsAgentStep } = additionalToolDefinitions[name]
       return buildShortToolDescription({
         toolName: name,
-        schema: { type: 'json', value: inputJsonSchema },
-        endsAgentStep,
+        schema: ensureZodSchema(inputSchema),
+        endsAgentStep: endsAgentStep ?? true,
       })
     }),
   ]
@@ -284,6 +299,41 @@ ${getToolCallString(
 
 Important: You only have access to the tools below. Do not use any other tools -- they are not available to you, instead they may have been previously used by other agents.
 
-${toolDescriptions.join('\n\n')}
+${toolDescriptionsList.join('\n\n')}
 `.trim()
+}
+
+export async function getToolSet(params: {
+  toolNames: string[]
+  additionalToolDefinitions: () => Promise<CustomToolDefinitions>
+  agentTools: ToolSet
+}): Promise<ToolSet> {
+  const { toolNames, additionalToolDefinitions, agentTools } = params
+
+  const toolSet: ToolSet = {}
+  for (const toolName of toolNames) {
+    if (toolName in toolParams) {
+      toolSet[toolName] = toolParams[toolName as ToolName]
+    }
+  }
+
+  const toolDefinitions = await additionalToolDefinitions()
+  for (const [toolName, toolDefinition] of Object.entries(toolDefinitions)) {
+    const clonedDef = cloneDeep(toolDefinition)
+    // Custom tool inputSchema may be JSON Schema (from SDK) or Zod (from MCP)
+    // Ensure it's a Zod schema for the AI SDK
+    const zodSchema = ensureZodSchema(clonedDef.inputSchema)
+    const safeSchema = ensureJsonSchemaCompatible(zodSchema)
+    toolSet[toolName] = {
+      ...clonedDef,
+      inputSchema: safeSchema,
+    } as (typeof toolSet)[string]
+  }
+
+  // Add agent tools (agents as direct tool calls)
+  for (const [toolName, toolDefinition] of Object.entries(agentTools)) {
+    toolSet[toolName] = toolDefinition
+  }
+
+  return toolSet
 }

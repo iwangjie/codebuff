@@ -1,26 +1,15 @@
 import { execSync } from 'child_process'
-import { EventEmitter } from 'events'
 import fs from 'fs'
 import path from 'path'
 
 import { runAgentStep } from '@codebuff/agent-runtime/run-agent-step'
 import { assembleLocalAgentTemplates } from '@codebuff/agent-runtime/templates/agent-registry'
-import {
-  handleStepsLogChunkWs,
-  requestFilesWs,
-  requestMcpToolDataWs,
-  requestOptionalFileWs,
-  requestToolCallWs,
-  sendActionWs,
-  sendSubagentChunkWs,
-} from '@codebuff/backend/client-wrapper'
 import { getFileTokenScores } from '@codebuff/code-map/parse'
 import { API_KEY_ENV_VAR, TEST_USER_ID } from '@codebuff/common/old-constants'
-import { mockModule } from '@codebuff/common/testing/mock-modules'
+import { clientToolCallSchema } from '@codebuff/common/tools/list'
 import { generateCompactId } from '@codebuff/common/util/string'
-import { handleToolCall } from '@codebuff/npm-app/tool-handlers'
-import { getSystemInfo } from '@codebuff/npm-app/utils/system-info'
-import { mock } from 'bun:test'
+import { getSystemInfo } from '@codebuff/common/util/system-info'
+import { ToolHelpers } from '@codebuff/sdk'
 import { blue } from 'picocolors'
 
 import { EVALS_AGENT_RUNTIME_IMPL } from './impl/agent-runtime'
@@ -29,16 +18,11 @@ import {
   getProjectFileTree,
 } from '../common/src/project-file-tree'
 
-import type {
-  SDKAssistantMessage,
-  SDKUserMessage,
-} from '@anthropic-ai/claude-code'
 import type { ClientToolCall } from '@codebuff/common/tools/list'
 import type { AgentRuntimeScopedDeps } from '@codebuff/common/types/contracts/agent-runtime'
-import type {
-  ToolResultOutput,
-  ToolResultPart,
-} from '@codebuff/common/types/messages/content-part'
+import type { CodebuffFileSystem } from '@codebuff/common/types/filesystem'
+import type { ToolMessage } from '@codebuff/common/types/messages/codebuff-message'
+import type { ToolResultOutput } from '@codebuff/common/types/messages/content-part'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type {
   AgentState,
@@ -46,24 +30,8 @@ import type {
   SessionState,
 } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-import type { WebSocket } from 'ws'
 
 const DEBUG_MODE = true
-
-export type ToolResultBlockParam = Extract<
-  SDKUserMessage['message']['content'][number],
-  { type: 'tool_result' }
->
-export type ToolUseBlock = Extract<
-  SDKAssistantMessage['message']['content'][number],
-  { type: 'tool_use' }
->
-
-export type AgentStep = {
-  response: string
-  toolCalls: (ClientToolCall | ToolUseBlock)[]
-  toolResults: (ToolResultPart | ToolResultBlockParam)[]
-}
 
 function readMockFile(projectRoot: string, filePath: string): string | null {
   const fullPath = path.join(projectRoot, filePath)
@@ -75,68 +43,107 @@ function readMockFile(projectRoot: string, filePath: string): string | null {
 }
 
 let toolCalls: ClientToolCall[] = []
-let toolResults: ToolResultPart[] = []
-export async function createFileReadingMock(projectRoot: string) {
-  await mockModule('@codebuff/backend/websockets/websocket-action', () => ({
-    requestFiles: ((params: { ws: WebSocket; filePaths: string[] }) => {
-      const files: Record<string, string | null> = {}
-      for (const filePath of params.filePaths) {
-        files[filePath] = readMockFile(projectRoot, filePath)
-      }
-      return Promise.resolve(files)
-    }) satisfies typeof requestFilesWs,
-    requestToolCall: (async (params: {
-      ws: WebSocket
-      userInputId: string
-      toolName: string
-      input: Record<string, any>
-    }): ReturnType<typeof requestToolCallWs> => {
-      const { toolName, input } = params
-      // Execute the tool call using existing tool handlers
-      const toolCall = {
-        toolCallId: generateCompactId(),
-        toolName,
-        input,
-      }
-      toolCalls.push(toolCall as ClientToolCall)
-      try {
-        const toolResult = await handleToolCall(toolCall as any)
-        toolResults.push({
-          type: 'tool-result',
-          toolName: toolCall.toolName,
-          toolCallId: toolCall.toolCallId,
-          output: toolResult.output,
-        })
+let toolResults: ToolMessage[] = []
+const defaultFs: CodebuffFileSystem = fs.promises as unknown as CodebuffFileSystem
+let projectRootForMocks: string | undefined
 
-        // Send successful response back to backend
-        return {
-          output: toolResult.output,
-        }
-      } catch (error) {
-        // Send error response back to backend
-        const resultString =
-          error instanceof Error ? error.message : String(error)
-        const output = [
-          {
-            type: 'json',
-            value: { errorMessage: resultString },
+export function createFileReadingMock(projectRoot: string) {
+  projectRootForMocks = projectRoot
+}
+
+function getActiveProjectRoot(fileContext?: ProjectFileContext) {
+  return fileContext?.projectRoot ?? projectRootForMocks ?? process.cwd()
+}
+
+async function readFilesFromProject(params: {
+  projectRoot: string
+  filePaths: string[]
+}) {
+  const { projectRoot, filePaths } = params
+  const files: Record<string, string | null> = {}
+  for (const filePath of filePaths) {
+    const fileContent = readMockFile(projectRoot, filePath)
+    files[filePath] = fileContent
+  }
+  return files
+}
+
+async function executeToolCall(
+  toolCall: ClientToolCall,
+  projectRoot: string,
+): Promise<ToolResultOutput[]> {
+  switch (toolCall.toolName) {
+    case 'write_file':
+    case 'str_replace':
+      return ToolHelpers.changeFile({
+        parameters: toolCall.input,
+        cwd: projectRoot,
+        fs: defaultFs,
+      })
+    case 'run_terminal_command': {
+      const resolvedCwd = path.resolve(
+        projectRoot,
+        (toolCall.input as { cwd?: string }).cwd ?? '.',
+      )
+      return ToolHelpers.runTerminalCommand({
+        ...(toolCall.input as any),
+        cwd: resolvedCwd,
+      })
+    }
+    case 'code_search':
+      return ToolHelpers.codeSearch({
+        ...(toolCall.input as any),
+        projectPath: projectRoot,
+      })
+    case 'list_directory':
+      return ToolHelpers.listDirectory({
+        directoryPath: (toolCall.input as { path: string }).path,
+        projectPath: projectRoot,
+        fs: defaultFs,
+      })
+    case 'glob':
+      return ToolHelpers.glob({
+        ...(toolCall.input as any),
+        projectPath: projectRoot,
+        fs: defaultFs,
+      })
+    case 'run_file_change_hooks':
+      return ToolHelpers.runFileChangeHooks(toolCall.input as any)
+    case 'browser_logs':
+    case 'create_plan':
+      return [
+        {
+          type: 'json',
+          value: {
+            message: `Tool ${toolCall.toolName} is a no-op in eval scaffolding.`,
           },
-        ] satisfies ToolResultOutput[]
-        toolResults.push({
-          type: 'tool-result',
-          toolName: toolCall.toolName,
-          toolCallId: toolCall.toolCallId,
-          output,
-        })
-        return { output }
-      }
-    }) satisfies typeof requestToolCallWs,
-  }))
+        },
+      ]
+    case 'ask_user':
+      return [
+        {
+          type: 'json',
+          value: {
+            errorMessage: 'ask_user is not supported in eval scaffolding',
+          },
+        },
+      ]
+    default:
+      return [
+        {
+          type: 'json',
+          value: {
+            errorMessage: 'Unsupported tool in eval scaffolding',
+          },
+        },
+      ]
+  }
 }
 
 export async function getProjectFileContext(
   projectPath: string,
 ): Promise<ProjectFileContext> {
+  projectRootForMocks = projectPath
   const fileTree = await getProjectFileTree({
     projectRoot: projectPath,
     fs: fs.promises,
@@ -181,39 +188,57 @@ export async function runAgentStepScaffolding(
   sessionId: string,
   agentType: AgentTemplateType,
 ) {
-  const mockWs = new EventEmitter() as WebSocket
-  mockWs.send = mock()
-  mockWs.close = mock()
-
   let fullResponse = ''
+  const projectRoot = getActiveProjectRoot(fileContext)
   const { agentTemplates: localAgentTemplates } = assembleLocalAgentTemplates({
     fileContext,
     logger: console,
   })
 
   const agentRuntimeScopedImpl: AgentRuntimeScopedDeps = {
-    handleStepsLogChunk: (params) =>
-      handleStepsLogChunkWs({ ...params, ws: mockWs }),
-    requestToolCall: (params) => requestToolCallWs({ ...params, ws: mockWs }),
-    requestMcpToolData: (params) =>
-      requestMcpToolDataWs({ ...params, ws: mockWs }),
-    requestFiles: (params) => requestFilesWs({ ...params, ws: mockWs }),
-    requestOptionalFile: (params) =>
-      requestOptionalFileWs({ ...params, ws: mockWs }),
-    sendSubagentChunk: (params) =>
-      sendSubagentChunkWs({ ...params, ws: mockWs }),
-    sendAction: (params) => sendActionWs({ ...params, ws: mockWs }),
+    handleStepsLogChunk: () => {},
+    requestToolCall: async ({ toolName, input }) => {
+      const parsedToolCall = clientToolCallSchema.parse({ toolName, input })
+      const toolCall: ClientToolCall = {
+        ...(parsedToolCall as ClientToolCall),
+        toolCallId: generateCompactId(),
+      }
+      toolCalls.push(toolCall)
+      const output = await executeToolCall(toolCall, projectRoot)
+      toolResults.push({
+        role: 'tool',
+        toolName: toolCall.toolName,
+        toolCallId: toolCall.toolCallId,
+        content: output,
+      })
+      return { output }
+    },
+    requestMcpToolData: async () => [],
+    requestFiles: ({ filePaths }) =>
+      readFilesFromProject({ projectRoot, filePaths }),
+    requestOptionalFile: async ({ filePath }) => {
+      const files = await readFilesFromProject({
+        projectRoot,
+        filePaths: [filePath],
+      })
+      return files[filePath] ?? null
+    },
+    sendSubagentChunk: () => {},
+    sendAction: () => {},
     apiKey: process.env[API_KEY_ENV_VAR] ?? '',
   }
   const result = await runAgentStep({
     ...EVALS_AGENT_RUNTIME_IMPL,
     ...agentRuntimeScopedImpl,
-    textOverride: null,
-    runId: 'test-run-id',
-    userId: TEST_USER_ID,
-    userInputId: generateCompactId(),
+
+    additionalToolDefinitions: () => Promise.resolve({}),
+    agentState,
+    agentType,
+    ancestorRunIds: [],
     clientSessionId: sessionId,
+    fileContext,
     fingerprintId: 'test-fingerprint-id',
+    localAgentTemplates,
     onResponseChunk: (chunk: string | PrintModeEvent) => {
       if (typeof chunk !== 'string') {
         return
@@ -223,15 +248,16 @@ export async function runAgentStepScaffolding(
       }
       fullResponse += chunk
     },
-    agentType,
-    fileContext,
-    localAgentTemplates,
-    agentState,
     prompt,
-    spawnParams: undefined,
-    repoUrl: undefined,
     repoId: undefined,
+    repoUrl: undefined,
+    runId: 'test-run-id',
+    signal: new AbortController().signal,
+    spawnParams: undefined,
     system: 'Test system prompt',
+    tools: {},
+    userId: TEST_USER_ID,
+    userInputId: generateCompactId(),
   })
 
   return {
@@ -241,10 +267,19 @@ export async function runAgentStepScaffolding(
 }
 
 export async function runToolCalls(toolCalls: ClientToolCall[]) {
-  const toolResults: ToolResultPart[] = []
+  const toolResults: ToolMessage[] = []
   for (const toolCall of toolCalls) {
-    const toolResult = await handleToolCall(toolCall)
-    toolResults.push(toolResult)
+    const toolCallId = toolCall.toolCallId ?? generateCompactId()
+    const output = await executeToolCall(
+      { ...toolCall, toolCallId } as ClientToolCall,
+      getActiveProjectRoot(),
+    )
+    toolResults.push({
+      role: 'tool',
+      toolName: toolCall.toolName,
+      toolCallId,
+      content: output,
+    })
   }
   return toolResults
 }
@@ -252,14 +287,12 @@ export async function runToolCalls(toolCalls: ClientToolCall[]) {
 export async function loopMainPrompt({
   sessionState,
   prompt,
-  projectPath,
   maxIterations,
   stopCondition,
   agentType,
 }: {
   sessionState: SessionState
   prompt: string
-  projectPath: string
   maxIterations: number
   stopCondition?: (sessionState: AgentState) => boolean
   agentType: AgentTemplateType
@@ -270,7 +303,7 @@ export async function loopMainPrompt({
   const sessionId = 'test-session-id-' + generateCompactId()
   let currentAgentState = sessionState.mainAgentState
   let iterations = 1
-  const steps: AgentStep[] = []
+  const steps: any[] = []
 
   for (; iterations < maxIterations; iterations++) {
     console.log('\nIteration', iterations)

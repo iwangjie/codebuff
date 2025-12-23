@@ -6,6 +6,8 @@ import * as schema from '@codebuff/internal/db/schema'
 import { withSerializableTransaction } from '@codebuff/internal/db/transaction'
 import { and, asc, gt, isNull, or, eq, sql } from 'drizzle-orm'
 
+import { reportPurchasedCreditsToStripe } from './stripe-metering'
+
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type {
   ParamsExcluding,
@@ -330,12 +332,13 @@ export async function calculateUsageAndBalance(
  */
 export async function consumeCredits(params: {
   userId: string
+  stripeCustomerId?: string | null
   creditsToConsume: number
   logger: Logger
 }): Promise<CreditConsumptionResult> {
   const { userId, creditsToConsume, logger } = params
 
-  return await withSerializableTransaction({
+  const result = await withSerializableTransaction({
     callback: async (tx) => {
       const now = new Date()
       const activeGrants = await getOrderedActiveGrants({
@@ -364,11 +367,24 @@ export async function consumeCredits(params: {
     context: { userId, creditsToConsume },
     logger,
   })
+
+  await reportPurchasedCreditsToStripe({
+    userId,
+    stripeCustomerId: params.stripeCustomerId,
+    purchasedCredits: result.fromPurchased,
+    logger,
+    extraPayload: {
+      source: 'consumeCredits',
+    },
+  })
+
+  return result
 }
 
 export async function consumeCreditsAndAddAgentStep(params: {
   messageId: string
   userId: string
+  stripeCustomerId?: string | null
   agentId: string
   clientId: string | null
   clientRequestId: string | null
@@ -381,6 +397,7 @@ export async function consumeCreditsAndAddAgentStep(params: {
 
   cost: number
   credits: number
+  byok: boolean
 
   inputTokens: number
   cacheCreationInputTokens: number | null
@@ -405,6 +422,7 @@ export async function consumeCreditsAndAddAgentStep(params: {
 
     cost,
     credits,
+    byok,
 
     inputTokens,
     cacheCreationInputTokens,
@@ -419,35 +437,40 @@ export async function consumeCreditsAndAddAgentStep(params: {
   const latencyMs = finishedAt.getTime() - startTime.getTime()
 
   try {
-    return success(
-      await withSerializableTransaction({
+    const result = await withSerializableTransaction({
         callback: async (tx) => {
           const now = new Date()
-          const activeGrants = await getOrderedActiveGrants({
-            ...params,
-            now,
-            conn: tx,
-          })
 
-          if (activeGrants.length === 0) {
-            logger.error(
-              { userId, credits },
-              'No active grants found to consume credits from',
-            )
-            throw new Error('No active grants found')
+          let result: CreditConsumptionResult | null = null
+          consumeCredits: {
+            if (byok) {
+              break consumeCredits
+            }
+            const activeGrants = await getOrderedActiveGrants({
+              ...params,
+              now,
+              conn: tx,
+            })
+
+            if (activeGrants.length === 0) {
+              logger.error(
+                { userId, credits },
+                'No active grants found to consume credits from',
+              )
+              throw new Error('No active grants found')
+            }
+
+            result = await consumeFromOrderedGrants({
+              ...params,
+              creditsToConsume: credits,
+              grants: activeGrants,
+              tx,
+            })
+
+            if (userId === TEST_USER_ID) {
+              return { ...result, agentStepId: 'test-step-id' }
+            }
           }
-
-          const result = await consumeFromOrderedGrants({
-            ...params,
-            creditsToConsume: credits,
-            grants: activeGrants,
-            tx,
-          })
-
-          if (userId === TEST_USER_ID) {
-            return { ...result, agentStepId: 'test-step-id' }
-          }
-          const stepId = crypto.randomUUID()
 
           try {
             await tx.insert(schema.message).values({
@@ -466,6 +489,7 @@ export async function consumeCreditsAndAddAgentStep(params: {
               output_tokens: outputTokens,
               cost: cost.toString(),
               credits,
+              byok,
               latency_ms: latencyMs,
               user_id: userId,
             })
@@ -474,12 +498,32 @@ export async function consumeCreditsAndAddAgentStep(params: {
             throw error
           }
 
-          return { ...result, agentStepId: stepId }
+          if (!result) {
+            result = {
+              consumed: 0,
+              fromPurchased: 0,
+            }
+          }
+          return { ...result, agentStepId: crypto.randomUUID() }
         },
         context: { userId, credits },
         logger,
-      }),
-    )
+      })
+
+    await reportPurchasedCreditsToStripe({
+      userId,
+      stripeCustomerId: params.stripeCustomerId,
+      purchasedCredits: result.fromPurchased,
+      logger,
+      eventId: messageId,
+      timestamp: finishedAt,
+      extraPayload: {
+        source: 'consumeCreditsAndAddAgentStep',
+        message_id: messageId,
+      },
+    })
+
+    return success(result)
   } catch (error) {
     logger.error(
       { error: getErrorObject(error) },

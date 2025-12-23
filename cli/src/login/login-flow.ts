@@ -1,14 +1,17 @@
+import { createCodebuffApiClient } from '../utils/codebuff-api'
+
+import type {
+  CodebuffApiClient,
+  LoginCodeResponse,
+} from '../utils/codebuff-api'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 
-export interface LoginUrlResponse {
-  loginUrl: string
-  fingerprintHash: string
-  expiresAt: string
-}
+// Re-export for backwards compatibility
+export type LoginUrlResponse = LoginCodeResponse
 
 export interface GenerateLoginUrlDeps {
-  fetch: typeof fetch
   logger: Logger
+  apiClient?: CodebuffApiClient
 }
 
 export interface GenerateLoginUrlOptions {
@@ -20,61 +23,44 @@ export async function generateLoginUrl(
   deps: GenerateLoginUrlDeps,
   options: GenerateLoginUrlOptions,
 ): Promise<LoginUrlResponse> {
-  const { fetch, logger } = deps
+  const { logger, apiClient: providedApiClient } = deps
   const { baseUrl, fingerprintId } = options
 
-  logger.info(
-    { fingerprintId, baseUrl },
-    '🌐 Generating login URL via CLI auth endpoint',
-  )
+  const apiClient =
+    providedApiClient ??
+    createCodebuffApiClient({
+      baseUrl,
+    })
 
-  const url = `${baseUrl}/api/auth/cli/code`
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ fingerprintId }),
-  })
-
-  logger.info(
-    {
-      status: response.status,
-      statusText: response.statusText,
-    },
-    '📥 Received response from login URL endpoint',
-  )
+  const response = await apiClient.loginCode({ fingerprintId })
 
   if (!response.ok) {
     logger.error(
       {
         status: response.status,
-        statusText: response.statusText,
+        error: response.error,
       },
       '❌ Failed to request login URL',
     )
     throw new Error('Failed to get login URL')
   }
 
-  const data = (await response.json()) as LoginUrlResponse
+  if (!response.data) {
+    logger.error(
+      { status: response.status },
+      '❌ Empty response from login URL',
+    )
+    throw new Error('Failed to get login URL')
+  }
 
-  logger.info(
-    {
-      hasLoginUrl: !!data.loginUrl,
-      hasFingerprintHash: !!data.fingerprintHash,
-      expiresAt: data.expiresAt,
-    },
-    '✅ Login URL generated successfully',
-  )
-
-  return data
+  return response.data
 }
 
 interface PollLoginStatusDeps {
-  fetch: typeof fetch
   sleep: (ms: number) => Promise<void>
   logger: Logger
   now?: () => number
+  apiClient?: CodebuffApiClient
 }
 
 interface PollLoginStatusOptions {
@@ -96,7 +82,7 @@ export async function pollLoginStatus(
   deps: PollLoginStatusDeps,
   options: PollLoginStatusOptions,
 ): Promise<PollLoginStatusResult> {
-  const { fetch, sleep, logger } = deps
+  const { sleep, logger, apiClient: providedApiClient } = deps
   const {
     baseUrl,
     fingerprintId,
@@ -111,17 +97,11 @@ export async function pollLoginStatus(
   const startTime = now()
   let attempts = 0
 
-  logger.info(
-    {
+  const apiClient =
+    providedApiClient ??
+    createCodebuffApiClient({
       baseUrl,
-      fingerprintId,
-      fingerprintHash,
-      expiresAt,
-      intervalMs,
-      timeoutMs,
-    },
-    '🚀 Starting login polling session',
-  )
+    })
 
   while (true) {
     if (shouldContinue && !shouldContinue()) {
@@ -136,19 +116,37 @@ export async function pollLoginStatus(
 
     attempts += 1
 
-    const url = new URL('/api/auth/cli/status', baseUrl)
-    url.searchParams.set('fingerprintId', fingerprintId)
-    url.searchParams.set('fingerprintHash', fingerprintHash)
-    url.searchParams.set('expiresAt', expiresAt)
-
-    logger.info(
-      { attempts, url: url.toString() },
-      '📡 Polling login status endpoint',
-    )
-
-    let response: Response
     try {
-      response = await fetch(url.toString())
+      const response = await apiClient.loginStatus({
+        fingerprintId,
+        fingerprintHash,
+        expiresAt,
+      })
+
+      if (!response.ok) {
+        if (response.status !== 401) {
+          logger.warn(
+            {
+              attempts,
+              status: response.status,
+              error: response.error,
+            },
+            '⚠️ Unexpected status while polling',
+          )
+        }
+        await sleep(intervalMs)
+        continue
+      }
+
+      if (response.data?.user && typeof response.data.user === 'object') {
+        return {
+          status: 'success',
+          user: response.data.user as Record<string, unknown>,
+          attempts,
+        }
+      }
+
+      await sleep(intervalMs)
     } catch (error) {
       logger.error(
         {
@@ -160,63 +158,5 @@ export async function pollLoginStatus(
       await sleep(intervalMs)
       continue
     }
-
-    logger.info(
-      {
-        attempts,
-        status: response.status,
-        ok: response.ok,
-      },
-      '📥 Received polling response',
-    )
-
-    if (!response.ok) {
-      if (response.status !== 401) {
-        logger.warn(
-          {
-            attempts,
-            status: response.status,
-            statusText: response.statusText,
-          },
-          '⚠️ Unexpected status while polling',
-        )
-      }
-      await sleep(intervalMs)
-      continue
-    }
-
-    let data: unknown
-    try {
-      data = await response.json()
-    } catch (error) {
-      logger.error(
-        {
-          attempts,
-          error: error instanceof Error ? error.message : String(error),
-        },
-        '💥 Failed to parse polling response JSON',
-      )
-      await sleep(intervalMs)
-      continue
-    }
-
-    const rawUser = (data as { user?: unknown } | null)?.user
-    if (rawUser && typeof rawUser === 'object') {
-      const user = rawUser as Record<string, unknown>
-      logger.info(
-        {
-          attempts,
-          userPreview: {
-            name: (user as { name?: string }).name ?? null,
-            email: (user as { email?: string }).email ?? null,
-            id: (user as { id?: string }).id ?? null,
-          },
-        },
-        '🎉 Login detected during polling',
-      )
-      return { status: 'success', user, attempts }
-    }
-
-    await sleep(intervalMs)
   }
 }

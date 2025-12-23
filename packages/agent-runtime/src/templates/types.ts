@@ -13,8 +13,6 @@ export type { AgentTemplate, StepGenerator, StepHandler }
 
 const placeholderNames = [
   'AGENT_NAME',
-  'AGENTS_PROMPT',
-  'CONFIG_SCHEMA',
   'FILE_TREE_PROMPT_SMALL',
   'FILE_TREE_PROMPT',
   'FILE_TREE_PROMPT_LARGE',
@@ -24,7 +22,6 @@ const placeholderNames = [
   'PROJECT_ROOT',
   'REMAINING_STEPS',
   'SYSTEM_INFO_PROMPT',
-  'TOOLS_PROMPT',
   'USER_CWD',
   'USER_INPUT_PROMPT',
 ] as const

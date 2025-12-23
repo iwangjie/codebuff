@@ -1,29 +1,41 @@
-import { pluralize } from '@codebuff/common/util/string'
 import { TextAttributes } from '@opentui/core'
-import React, { type ReactNode } from 'react'
-import stringWidth from 'string-width'
+import React, { memo, useCallback, useState, type ReactNode } from 'react'
 
 import { AgentBranchItem } from './agent-branch-item'
-import { renderToolComponent } from './tools/registry'
-import { ToolCallItem } from './tools/tool-call-item'
+import { Button } from './button'
+import { CopyButton, useCopyButton } from './copy-icon-button'
+import { ImageCard } from './image-card'
+import { MessageFooter } from './message-footer'
+import { ValidationErrorPopover } from './validation-error-popover'
 import { useTheme } from '../hooks/use-theme'
-import { getToolDisplayInfo } from '../utils/codebuff-client'
+import { useWhyDidYouUpdateById } from '../hooks/use-why-did-you-update'
+import { isTextBlock, isToolBlock, isImageBlock } from '../types/chat'
+import { shouldRenderAsSimpleText } from '../utils/constants'
 import {
-  renderMarkdown,
-  renderStreamingMarkdown,
-  hasMarkdown,
-  type MarkdownPalette,
-} from '../utils/markdown-renderer'
+  isImplementorAgent,
+  getImplementorDisplayName,
+  getImplementorIndex,
+} from '../utils/implementor-helpers'
+import { type MarkdownPalette } from '../utils/markdown-renderer'
+import { formatCwd } from '../utils/path-helpers'
+import { AgentListBranch } from './blocks/agent-list-branch'
+import { AskUserBranch } from './blocks/ask-user-branch'
+import { ContentWithMarkdown } from './blocks/content-with-markdown'
+import { ImageBlock } from './blocks/image-block'
+import { ThinkingBlock } from './blocks/thinking-block'
+import { ToolBranch } from './blocks/tool-branch'
+import { PlanBox } from './renderers/plan-box'
 
-import type { ElapsedTimeTracker } from '../hooks/use-elapsed-time'
-import type { ContentBlock } from '../types/chat'
+import type {
+  ContentBlock,
+  TextContentBlock,
+  HtmlContentBlock,
+  AgentContentBlock,
+  ImageAttachment,
+  ImageContentBlock,
+  ChatMessageMetadata,
+} from '../types/chat'
 import type { ThemeColor } from '../types/theme-system'
-
-const trimTrailingNewlines = (value: string): string =>
-  value.replace(/[\r\n]+$/g, '')
-
-const sanitizePreview = (value: string): string =>
-  value.replace(/[#*_`~\[\]()]/g, '').trim()
 
 interface MessageBlockProps {
   messageId: string
@@ -36,18 +48,59 @@ interface MessageBlockProps {
   isComplete?: boolean
   completionTime?: string
   credits?: number
-  timer: ElapsedTimeTracker
+  timerStartTime: number | null
   textColor?: ThemeColor
   timestampColor: string
   markdownOptions: { codeBlockWidth: number; palette: MarkdownPalette }
   availableWidth: number
   markdownPalette: MarkdownPalette
-  collapsedAgents: Set<string>
   streamingAgents: Set<string>
   onToggleCollapsed: (id: string) => void
+  onBuildFast: () => void
+  onBuildMax: () => void
+  onFeedback?: (messageId: string) => void
+  onCloseFeedback?: () => void
+  validationErrors?: Array<{ id: string; message: string }>
+  onOpenFeedback?: (options?: {
+    category?: string
+    footerMessage?: string
+    errors?: Array<{ id: string; message: string }>
+  }) => void
+  attachments?: ImageAttachment[]
+  metadata?: ChatMessageMetadata
+  isLastMessage?: boolean
 }
 
-export const MessageBlock = ({
+const MessageAttachments = ({
+  attachments,
+}: {
+  attachments: ImageAttachment[]
+}) => {
+  if (attachments.length === 0) {
+    return null
+  }
+
+  return (
+    <box
+      style={{
+        flexDirection: 'row',
+        gap: 1,
+        flexWrap: 'wrap',
+        marginTop: 1,
+      }}
+    >
+      {attachments.map((attachment) => (
+        <ImageCard
+          key={attachment.path}
+          image={attachment}
+          showRemoveButton={false}
+        />
+      ))}
+    </box>
+  )
+}
+
+export const MessageBlock: React.FC<MessageBlockProps> = ({
   messageId,
   blocks,
   content,
@@ -58,409 +111,342 @@ export const MessageBlock = ({
   isComplete,
   completionTime,
   credits,
-  timer,
+  timerStartTime,
   textColor,
   timestampColor,
   markdownOptions,
   availableWidth,
   markdownPalette,
-  collapsedAgents,
   streamingAgents,
   onToggleCollapsed,
-}: MessageBlockProps): ReactNode => {
+  onBuildFast,
+  onBuildMax,
+  onFeedback,
+  onCloseFeedback,
+  validationErrors,
+  onOpenFeedback,
+  attachments,
+  metadata,
+  isLastMessage,
+}) => {
+  const [showValidationPopover, setShowValidationPopover] = useState(false)
+
+  const bashCwd = metadata?.bashCwd ? formatCwd(metadata.bashCwd) : undefined
+
+  useWhyDidYouUpdateById(
+    'MessageBlock',
+    messageId,
+    {
+      messageId,
+      blocks,
+      content,
+      isUser,
+      isAi,
+      isLoading,
+      timestamp,
+      isComplete,
+      completionTime,
+      credits,
+      timerStartTime,
+      textColor,
+      timestampColor,
+      markdownOptions,
+      availableWidth,
+      markdownPalette,
+      streamingAgents,
+      onToggleCollapsed,
+      onBuildFast,
+      onBuildMax,
+      onFeedback,
+      onCloseFeedback,
+      validationErrors,
+      onOpenFeedback,
+      metadata,
+      isLastMessage,
+    },
+    {
+      logLevel: 'debug',
+      enabled: false,
+    },
+  )
+
   const theme = useTheme()
   const resolvedTextColor = textColor ?? theme.foreground
 
-  // Get elapsed time from timer for streaming AI messages
-  const elapsedSeconds = timer.elapsedSeconds
-  const computeBranchChar = (
-    ancestorBranchStates: boolean[],
-    isLastBranch: boolean,
-  ) => {
-    // Only show branching characters when inside a subagent (indentLevel > 0)
-    if (ancestorBranchStates.length === 0) {
-      return ''
-    }
-    const ancestorPrefix = ancestorBranchStates
-      // Skip first level of ancestors for less clutter
-      .slice(1)
-      .map(() => '  ')
-      .join('')
-    return `${ancestorPrefix}${isLastBranch ? '└ ' : '├ '}`
-  }
+  return (
+    <box
+      style={{
+        flexDirection: 'column',
+        width: '100%',
+      }}
+    >
+      {/* User message timestamp with error indicator (non-bash commands) */}
+      {isUser && !bashCwd && (
+        <box style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
+          <text
+            attributes={TextAttributes.DIM}
+            style={{
+              wrapMode: 'none',
+              fg: timestampColor,
+            }}
+          >
+            {`[${timestamp}]`}
+          </text>
 
-  const renderContentWithMarkdown = (
-    rawContent: string,
-    isStreaming: boolean,
-    options: { codeBlockWidth: number; palette: MarkdownPalette },
-  ): ReactNode => {
-    if (!hasMarkdown(rawContent)) {
-      return rawContent
-    }
-    if (isStreaming) {
-      return renderStreamingMarkdown(rawContent, options)
-    }
-    return renderMarkdown(rawContent, options)
-  }
+          {validationErrors && validationErrors.length > 0 && (
+            <Button
+              onClick={() => setShowValidationPopover(!showValidationPopover)}
+            >
+              <text
+                style={{
+                  fg: theme.error,
+                  wrapMode: 'none',
+                }}
+              >
+                [!]
+              </text>
+            </Button>
+          )}
+        </box>
+      )}
 
-  const getToolFinishedPreview = (
-    toolBlock: Extract<ContentBlock, { type: 'tool' }>,
-    commandPreview: string | null,
-    lastLine: string,
-  ): string => {
-    if (commandPreview) {
-      return commandPreview
-    }
+      {/* Bash command metadata header (timestamp + cwd) - copy button moved inline */}
+      {bashCwd && (
+        <box style={{ flexDirection: 'row', alignItems: 'center', gap: 1 }}>
+          <text
+            attributes={TextAttributes.DIM}
+            style={{
+              wrapMode: 'none',
+              fg: timestampColor,
+            }}
+          >
+            {`[${timestamp}]`}
+          </text>
+          <text
+            attributes={TextAttributes.DIM}
+            style={{
+              wrapMode: 'none',
+              fg: theme.muted,
+            }}
+          >
+            •
+          </text>
+          <text
+            attributes={TextAttributes.DIM}
+            style={{
+              wrapMode: 'word',
+              fg: theme.muted,
+            }}
+          >
+            {bashCwd}
+          </text>
+        </box>
+      )}
 
-    if (toolBlock.toolName === 'run_terminal_command' && toolBlock.output) {
-      const outputLines = toolBlock.output
-        .split('\n')
-        .filter((line) => line.trim())
-      const lastThreeLines = outputLines.slice(-3)
-      const hasMoreLines = outputLines.length > 3
-      return hasMoreLines
-        ? '...\n' + lastThreeLines.join('\n')
-        : lastThreeLines.join('\n')
-    }
-
-    return sanitizePreview(lastLine)
-  }
-
-  const hasBranchAfter = (
-    sourceBlocks: ContentBlock[] | undefined,
-    currentIndex: number,
-  ): boolean =>
-    !!sourceBlocks
-      ?.slice(currentIndex + 1)
-      .some(
-        (candidate) => candidate.type === 'tool' || candidate.type === 'agent',
-      )
-
-  const getAgentMarkdownOptions = (indentLevel: number) => {
-    const indentationOffset = indentLevel * 2
-
-    return {
-      codeBlockWidth: Math.max(10, availableWidth - 12 - indentationOffset),
-      palette: {
-        ...markdownPalette,
-        inlineCodeFg: theme.foreground,
-        codeTextFg: theme.foreground,
-      },
-    }
-  }
-
-  const renderToolBranch = (
-    toolBlock: Extract<ContentBlock, { type: 'tool' }>,
-    indentLevel: number,
-    isLastBranch: boolean,
-    keyPrefix: string,
-    ancestorBranchStates: boolean[],
-  ): React.ReactNode => {
-    if (toolBlock.toolName === 'end_turn') {
-      return null
-    }
-
-    const displayInfo = getToolDisplayInfo(toolBlock.toolName)
-    const isCollapsed = collapsedAgents.has(toolBlock.toolCallId)
-    const isStreaming = streamingAgents.has(toolBlock.toolCallId)
-
-    const inputContent = `\`\`\`json\n${JSON.stringify(toolBlock.input, null, 2)}\n\`\`\``
-    const codeBlockLang =
-      toolBlock.toolName === 'run_terminal_command' ? '' : 'yaml'
-    const resultContent = toolBlock.output
-      ? `\n\n**Result:**\n\`\`\`${codeBlockLang}\n${toolBlock.output}\n\`\`\``
-      : ''
-    const fullContent = inputContent + resultContent
-
-    const lines = fullContent.split('\n').filter((line) => line.trim())
-    const firstLine = lines[0] || ''
-    const lastLine = lines[lines.length - 1] || firstLine
-    const commandPreview =
-      toolBlock.toolName === 'run_terminal_command' &&
-      toolBlock.input &&
-      typeof (toolBlock.input as any).command === 'string'
-        ? `$ ${(toolBlock.input as any).command.trim()}`
-        : null
-
-    const branchChar = computeBranchChar(ancestorBranchStates, isLastBranch)
-    const indentPrefix = branchChar.replace(/[├└]\s*$/, '')
-    // Only show preview prefix with branching when inside a subagent
-    const previewBasePrefix =
-      ancestorBranchStates.length > 0
-        ? indentPrefix.length > 0
-          ? `${indentPrefix}│ `
-          : '  │ '
-        : ''
-    const branchIndentWidth = stringWidth(branchChar)
-    const headerPrefixWidth = stringWidth(branchChar)
-    const previewBaseWidth = stringWidth(previewBasePrefix)
-    const alignmentPadding = Math.max(0, headerPrefixWidth - previewBaseWidth)
-    const paddedPreviewPrefix = previewBasePrefix
-      ? `${previewBasePrefix}${' '.repeat(alignmentPadding)}`
-      : ''
-    const blankPreviewPrefix = previewBasePrefix
-      ? previewBasePrefix.replace(/\s+$/, '') || previewBasePrefix
-      : ''
-    const toolRenderConfig =
-      renderToolComponent(toolBlock, theme, {
-        availableWidth,
-        indentationOffset: branchIndentWidth,
-        previewPrefix: previewBasePrefix,
-        labelWidth: headerPrefixWidth,
-        branchChar,
-      }) ?? {}
-    const formatPreview = (value: string | null): string => {
-      if (!value) return ''
-      // At top level, don't add preview prefix with branching characters
-      if (ancestorBranchStates.length === 0) {
-        return value
-      }
-      const rawLines = value.split('\n')
-      const decorated = rawLines.map((line) =>
-        line.trim().length > 0
-          ? `${paddedPreviewPrefix}${line}`
-          : blankPreviewPrefix,
-      )
-      if (!decorated.some((line) => line.trim().length === 0)) {
-        decorated.push(blankPreviewPrefix)
-      }
-      return decorated.join('\n')
-    }
-    const rawStreamingPreview = isStreaming
-      ? commandPreview ?? `${sanitizePreview(firstLine)}...`
-      : ''
-    const streamingPreview = isStreaming
-      ? formatPreview(rawStreamingPreview)
-      : ''
-    const collapsedPreviewBase =
-      toolRenderConfig.collapsedPreview ??
-      getToolFinishedPreview(toolBlock, commandPreview, lastLine)
-    const finishedPreview = !isStreaming
-      ? formatPreview(collapsedPreviewBase)
-      : ''
-    const agentMarkdownOptions = getAgentMarkdownOptions(indentLevel)
-    const displayContent = renderContentWithMarkdown(
-      fullContent,
-      false,
-      agentMarkdownOptions,
-    )
-
-    const renderableDisplayContent =
-      displayContent === null ||
-      displayContent === undefined ||
-      displayContent === false ||
-      displayContent === '' ? null : (
-        <text
-          fg={theme.foreground}
-          style={{ wrapMode: 'word' }}
-          attributes={
-            theme.messageTextAttributes && theme.messageTextAttributes !== 0
-              ? theme.messageTextAttributes
-              : undefined
-          }
-        >
-          {displayContent}
-        </text>
-      )
-
-    const headerName = displayInfo.name
-
-    return (
-      <box key={keyPrefix}>
-        {toolRenderConfig.content ? (
-          toolRenderConfig.content
-        ) : (
-          <ToolCallItem
-            name={headerName}
-            content={renderableDisplayContent}
-            isCollapsed={isCollapsed}
-            isStreaming={isStreaming}
-            branchChar={branchChar}
-            streamingPreview={streamingPreview}
-            finishedPreview={finishedPreview}
-            onToggle={() => onToggleCollapsed(toolBlock.toolCallId)}
-            titleSuffix={toolRenderConfig.path}
-          />
+      {/* Show validation popover below timestamp when expanded */}
+      {isUser &&
+        !bashCwd &&
+        validationErrors &&
+        validationErrors.length > 0 &&
+        showValidationPopover && (
+          <box style={{ paddingTop: 1, paddingBottom: 1 }}>
+            <ValidationErrorPopover
+              errors={validationErrors}
+              onOpenFeedback={onOpenFeedback}
+              onClose={() => setShowValidationPopover(false)}
+            />
+          </box>
         )}
-      </box>
-    )
-  }
 
-  function renderAgentBranch(
-    agentBlock: Extract<ContentBlock, { type: 'agent' }>,
-    indentLevel: number,
-    isLastBranch: boolean,
-    keyPrefix: string,
-    ancestorBranchStates: boolean[],
-  ): React.ReactNode {
-    const isCollapsed = collapsedAgents.has(agentBlock.agentId)
-    const isStreaming =
-      agentBlock.status === 'running' || streamingAgents.has(agentBlock.agentId)
-
-    const allTextContent =
-      agentBlock.blocks
-        ?.filter((nested) => nested.type === 'text')
-        .map((nested) => (nested as any).content)
-        .join('') || ''
-    const lines = allTextContent.split('\n').filter((line) => line.trim())
-    const firstLine = lines[0] || ''
-
-    let streamingPreview = ''
-    if (isStreaming) {
-      streamingPreview = agentBlock.initialPrompt
-        ? sanitizePreview(agentBlock.initialPrompt)
-        : `${sanitizePreview(firstLine)}...`
-    }
-
-    const finishedPreview =
-      !isStreaming && isCollapsed && agentBlock.initialPrompt
-        ? sanitizePreview(agentBlock.initialPrompt)
-        : ''
-
-    const branchChar = ''
-    const nextAncestorBranches = [...ancestorBranchStates, isLastBranch]
-    const childNodes = renderAgentBody(
-      agentBlock,
-      indentLevel + 1,
-      keyPrefix,
-      isStreaming,
-      nextAncestorBranches,
-    )
-
-    const displayContent =
-      childNodes.length > 0 ? (
-        <box style={{ flexDirection: 'column', gap: 0 }}>{childNodes}</box>
-      ) : null
-    const isActive = isStreaming || agentBlock.status === 'running'
-    const statusLabel = isActive
-      ? 'running'
-      : agentBlock.status === 'complete'
-        ? 'completed'
-        : agentBlock.status
-    const statusColor = isActive ? theme.primary : theme.muted
-    const statusIndicator = isActive ? '●' : '✓'
-
-    return (
-      <box key={keyPrefix} style={{ flexDirection: 'column', gap: 0 }}>
-        <AgentBranchItem
-          name={agentBlock.agentName}
-          content={displayContent}
-          prompt={agentBlock.initialPrompt}
-          agentId={agentBlock.agentId}
-          isCollapsed={isCollapsed}
-          isStreaming={isStreaming}
-          branchChar={branchChar}
-          streamingPreview={streamingPreview}
-          finishedPreview={finishedPreview}
-          statusLabel={statusLabel ?? undefined}
-          statusColor={statusColor}
-          statusIndicator={statusIndicator}
-          onToggle={() => onToggleCollapsed(agentBlock.agentId)}
-        />
-      </box>
-    )
-  }
-
-  function renderAgentListBranch(
-    agentListBlock: Extract<ContentBlock, { type: 'agent-list' }>,
-    isLastBranch: boolean,
-    keyPrefix: string,
-  ): React.ReactNode {
-    const isCollapsed = collapsedAgents.has(agentListBlock.id)
-    const { agents } = agentListBlock
-
-    const sortedAgents = [...agents].sort((a, b) => {
-      // Sort by displayName first (empty string if missing), then by ID as tiebreaker
-      const displayNameComparison = (a.displayName || '')
-        .toLowerCase()
-        .localeCompare((b.displayName || '').toLowerCase())
-
-      return (
-        displayNameComparison ||
-        a.id.toLowerCase().localeCompare(b.id.toLowerCase())
-      )
-    })
-
-    const agentCount = sortedAgents.length
-
-    const formatIdentifier = (agent: { id: string; displayName: string }) =>
-      agent.displayName && agent.displayName !== agent.id
-        ? `${agent.displayName} (${agent.id})`
-        : agent.displayName || agent.id
-
-    const renderAgentListItem = (
-      agent: { id: string; displayName: string },
-      idx: number,
-    ) => {
-      const identifier = formatIdentifier(agent)
-      return (
-        <text
-          key={`agent-${idx}`}
-          style={{ wrapMode: 'word', fg: theme.foreground }}
+      {blocks ? (
+        <box
+          style={{
+            flexDirection: 'column',
+            gap: 0,
+            width: '100%',
+            paddingTop: 0,
+          }}
         >
-          {`  • ${identifier}`}
-        </text>
-      )
-    }
-
-    const agentListContent = (
-      <box style={{ flexDirection: 'column', gap: 0 }}>
-        {sortedAgents.map(renderAgentListItem)}
-      </box>
-    )
-
-    const headerText = pluralize(agentCount, 'local agent')
-    return (
-      <box key={keyPrefix}>
-        <ToolCallItem
-          name={headerText}
-          content={agentListContent}
-          isCollapsed={isCollapsed}
-          isStreaming={false}
-          branchChar=""
-          streamingPreview=""
-          finishedPreview=""
-          onToggle={() => onToggleCollapsed(agentListBlock.id)}
+          <BlocksRenderer
+            sourceBlocks={blocks}
+            messageId={messageId}
+            isLoading={isLoading}
+            isComplete={isComplete}
+            isUser={isUser}
+            textColor={resolvedTextColor}
+            availableWidth={availableWidth}
+            markdownPalette={markdownPalette}
+            streamingAgents={streamingAgents}
+            onToggleCollapsed={onToggleCollapsed}
+            onBuildFast={onBuildFast}
+            onBuildMax={onBuildMax}
+            isLastMessage={isLastMessage}
+            contentToCopy={isUser ? content : undefined}
+          />
+        </box>
+      ) : (
+        <UserContentWithCopyButton
+          content={content}
+          messageId={messageId}
+          isLoading={isLoading}
+          isComplete={isComplete}
+          isUser={isUser}
+          textColor={resolvedTextColor}
+          codeBlockWidth={markdownOptions.codeBlockWidth}
+          palette={markdownOptions.palette}
+          showCopyButton={isUser}
         />
-      </box>
-    )
+      )}
+      {/* Show image attachments for user messages */}
+      {isUser && attachments && attachments.length > 0 && (
+        <MessageAttachments attachments={attachments} />
+      )}
+
+      {isAi && (
+        <MessageFooter
+          messageId={messageId}
+          blocks={blocks}
+          content={content}
+          isLoading={isLoading}
+          isComplete={isComplete}
+          completionTime={completionTime}
+          credits={credits}
+          timerStartTime={timerStartTime}
+          onFeedback={onFeedback}
+          onCloseFeedback={onCloseFeedback}
+        />
+      )}
+    </box>
+  )
+}
+
+const trimTrailingNewlines = (value: string): string =>
+  value.replace(/[\r\n]+$/g, '')
+
+const sanitizePreview = (value: string): string =>
+  value.replace(/[#*_`~\[\]()]/g, '').trim()
+
+// Extract all text content from blocks recursively
+
+const isReasoningTextBlock = (
+  b: ContentBlock | null | undefined,
+): b is TextContentBlock => {
+  if (!b || b.type !== 'text') return false
+  return b.textType === 'reasoning'
+}
+
+const isRenderableTimelineBlock = (
+  block: ContentBlock | null | undefined,
+): boolean => {
+  if (!block) {
+    return false
   }
 
-  function renderAgentBody(
-    agentBlock: Extract<ContentBlock, { type: 'agent' }>,
-    indentLevel: number,
-    keyPrefix: string,
-    parentIsStreaming: boolean,
-    ancestorBranchStates: boolean[],
-  ): React.ReactNode[] {
+  if (block.type === 'tool') {
+    return block.toolName !== 'end_turn'
+  }
+
+  switch (block.type) {
+    case 'text':
+    case 'html':
+    case 'agent':
+    case 'agent-list':
+    case 'plan':
+    case 'mode-divider':
+    case 'ask-user':
+    case 'image':
+      return true
+    default:
+      return false
+  }
+}
+
+interface AgentBodyProps {
+  agentBlock: Extract<ContentBlock, { type: 'agent' }>
+  keyPrefix: string
+  parentIsStreaming: boolean
+  availableWidth: number
+  markdownPalette: MarkdownPalette
+  streamingAgents: Set<string>
+  onToggleCollapsed: (id: string) => void
+  onBuildFast: () => void
+  onBuildMax: () => void
+  isLastMessage?: boolean
+}
+
+const AgentBody = memo(
+  ({
+    agentBlock,
+    keyPrefix,
+    parentIsStreaming,
+    availableWidth,
+    markdownPalette,
+    streamingAgents,
+    onToggleCollapsed,
+    onBuildFast,
+    onBuildMax,
+    isLastMessage,
+  }: AgentBodyProps): ReactNode[] => {
+    const theme = useTheme()
     const nestedBlocks = agentBlock.blocks ?? []
     const nodes: React.ReactNode[] = []
 
-    nestedBlocks.forEach((nestedBlock, nestedIdx) => {
-      switch (nestedBlock.type) {
+    const getAgentMarkdownOptions = useCallback(
+      (indent: number) => {
+        const indentationOffset = indent * 2
+        return {
+          codeBlockWidth: Math.max(10, availableWidth - 12 - indentationOffset),
+          palette: {
+            ...markdownPalette,
+            codeTextFg: theme.foreground,
+          },
+        }
+      },
+      [availableWidth, markdownPalette, theme.foreground],
+    )
+
+    for (let nestedIdx = 0; nestedIdx < nestedBlocks.length; ) {
+      const nestedBlock = nestedBlocks[nestedIdx]
+
+      // Handle reasoning text blocks first
+      if (isReasoningTextBlock(nestedBlock)) {
+        const start = nestedIdx
+        const reasoningBlocks: Extract<ContentBlock, { type: 'text' }>[] = []
+        while (nestedIdx < nestedBlocks.length) {
+          const block = nestedBlocks[nestedIdx]
+          if (!isReasoningTextBlock(block)) break
+          reasoningBlocks.push(block)
+          nestedIdx++
+        }
+
+        nodes.push(
+          <ThinkingBlock
+            key={`${keyPrefix}-thinking-${start}`}
+            blocks={reasoningBlocks}
+            keyPrefix={keyPrefix}
+            startIndex={start}
+            onToggleCollapsed={onToggleCollapsed}
+            availableWidth={availableWidth}
+            isNested={true}
+          />,
+        )
+        continue
+      }
+
+      switch ((nestedBlock as ContentBlock).type) {
         case 'text': {
-          const nestedStatus =
-            typeof (nestedBlock as any).status === 'string'
-              ? (nestedBlock as any).status
-              : undefined
+          const textBlock = nestedBlock as unknown as TextContentBlock
+          const nestedStatus = textBlock.status
           const isNestedStreamingText =
             parentIsStreaming || nestedStatus === 'running'
-          const rawNestedContent = isNestedStreamingText
-            ? trimTrailingNewlines(nestedBlock.content)
-            : nestedBlock.content.trim()
+          const filteredNestedContent = isNestedStreamingText
+            ? trimTrailingNewlines(textBlock.content)
+            : textBlock.content.trim()
           const renderKey = `${keyPrefix}-text-${nestedIdx}`
-          const markdownOptionsForLevel = getAgentMarkdownOptions(indentLevel)
-          const renderedContent = renderContentWithMarkdown(
-            rawNestedContent,
-            isNestedStreamingText,
-            markdownOptionsForLevel,
-          )
-          const marginTop = nestedBlock.marginTop ?? 0
-          const marginBottom = nestedBlock.marginBottom ?? 0
-          const explicitColor =
-            typeof (nestedBlock as any).color === 'string'
-              ? ((nestedBlock as any).color as string)
-              : undefined
+          const markdownOptionsForLevel = getAgentMarkdownOptions(0)
+          const marginTop = textBlock.marginTop ?? 0
+          const marginBottom = textBlock.marginBottom ?? 0
+          const explicitColor = textBlock.color
           const nestedTextColor = explicitColor ?? theme.foreground
           nodes.push(
             <text
@@ -468,20 +454,26 @@ export const MessageBlock = ({
               style={{
                 wrapMode: 'word',
                 fg: nestedTextColor,
-                marginLeft: Math.max(0, indentLevel * 2),
                 marginTop,
                 marginBottom,
               }}
             >
-              {renderedContent}
+              <ContentWithMarkdown
+                content={filteredNestedContent}
+                isStreaming={isNestedStreamingText}
+                codeBlockWidth={markdownOptionsForLevel.codeBlockWidth}
+                palette={markdownOptionsForLevel.palette}
+              />
             </text>,
           )
+          nestedIdx++
           break
         }
 
         case 'html': {
-          const marginTop = nestedBlock.marginTop ?? 0
-          const marginBottom = nestedBlock.marginBottom ?? 0
+          const htmlBlock = nestedBlock as HtmlContentBlock
+          const marginTop = htmlBlock.marginTop ?? 0
+          const marginBottom = htmlBlock.marginBottom ?? 0
           nodes.push(
             <box
               key={`${keyPrefix}-html-${nestedIdx}`}
@@ -492,92 +484,583 @@ export const MessageBlock = ({
                 marginBottom,
               }}
             >
-              {nestedBlock.render({
+              {htmlBlock.render({
                 textColor: theme.foreground,
                 theme,
               })}
             </box>,
           )
+          nestedIdx++
           break
         }
 
         case 'tool': {
-          const isLastBranch = !hasBranchAfter(nestedBlocks, nestedIdx)
-          nodes.push(
-            renderToolBranch(
-              nestedBlock,
-              indentLevel,
-              isLastBranch,
-              `${keyPrefix}-tool-${nestedBlock.toolCallId}`,
-              ancestorBranchStates,
-            ),
-          )
+          const start = nestedIdx
+          const toolGroup: Extract<ContentBlock, { type: 'tool' }>[] = []
+          while (nestedIdx < nestedBlocks.length) {
+            const block = nestedBlocks[nestedIdx]
+            if (!isToolBlock(block)) break
+            toolGroup.push(block)
+            nestedIdx++
+          }
+
+          const groupNodes = toolGroup.map((toolBlock) => (
+            <ToolBranch
+              key={`${keyPrefix}-tool-${toolBlock.toolCallId}`}
+              toolBlock={toolBlock}
+              keyPrefix={`${keyPrefix}-tool-${toolBlock.toolCallId}`}
+              availableWidth={availableWidth}
+              streamingAgents={streamingAgents}
+              onToggleCollapsed={onToggleCollapsed}
+              markdownPalette={markdownPalette}
+            />
+          ))
+
+          const nonNullGroupNodes = groupNodes.filter(
+            Boolean,
+          ) as React.ReactNode[]
+          if (nonNullGroupNodes.length > 0) {
+            const hasRenderableBefore =
+              start > 0 && isRenderableTimelineBlock(nestedBlocks[start - 1])
+            let hasRenderableAfter = false
+            for (let i = nestedIdx; i < nestedBlocks.length; i++) {
+              if (isRenderableTimelineBlock(nestedBlocks[i])) {
+                hasRenderableAfter = true
+                break
+              }
+            }
+            nodes.push(
+              <box
+                key={`${keyPrefix}-tool-group-${start}`}
+                style={{
+                  flexDirection: 'column',
+                  gap: 0,
+                  marginTop: hasRenderableBefore ? 1 : 0,
+                  marginBottom: hasRenderableAfter ? 1 : 0,
+                }}
+              >
+                {nonNullGroupNodes}
+              </box>,
+            )
+          }
           break
         }
 
         case 'agent': {
-          const isLastBranch = !hasBranchAfter(nestedBlocks, nestedIdx)
+          const agentBlock = nestedBlock as AgentContentBlock
           nodes.push(
-            renderAgentBranch(
-              nestedBlock,
-              indentLevel,
-              isLastBranch,
-              `${keyPrefix}-agent-${nestedIdx}`,
-              ancestorBranchStates,
-            ),
+            <AgentBranchWrapper
+              key={`${keyPrefix}-agent-${nestedIdx}`}
+              agentBlock={agentBlock}
+              keyPrefix={`${keyPrefix}-agent-${nestedIdx}`}
+              availableWidth={availableWidth}
+              markdownPalette={markdownPalette}
+              streamingAgents={streamingAgents}
+              onToggleCollapsed={onToggleCollapsed}
+              onBuildFast={onBuildFast}
+              onBuildMax={onBuildMax}
+              siblingBlocks={nestedBlocks}
+              isLastMessage={isLastMessage}
+            />,
           )
+          nestedIdx++
           break
         }
       }
-    })
+    }
 
     return nodes
-  }
+  },
+)
 
-  const renderSimpleContent = () => {
+interface AgentBranchWrapperProps {
+  agentBlock: Extract<ContentBlock, { type: 'agent' }>
+  keyPrefix: string
+  availableWidth: number
+  markdownPalette: MarkdownPalette
+  streamingAgents: Set<string>
+  onToggleCollapsed: (id: string) => void
+  onBuildFast: () => void
+  onBuildMax: () => void
+  siblingBlocks?: ContentBlock[]
+  isLastMessage?: boolean
+}
+
+const AgentBranchWrapper = memo(
+  ({
+    agentBlock,
+    keyPrefix,
+    availableWidth,
+    markdownPalette,
+    streamingAgents,
+    onToggleCollapsed,
+    onBuildFast,
+    onBuildMax,
+    siblingBlocks,
+    isLastMessage,
+  }: AgentBranchWrapperProps) => {
+    const theme = useTheme()
+
+    if (shouldRenderAsSimpleText(agentBlock.agentType)) {
+      const isStreaming =
+        agentBlock.status === 'running' ||
+        streamingAgents.has(agentBlock.agentId)
+      const isComplete = agentBlock.status === 'complete'
+      const statusIndicator = isStreaming ? '●' : isComplete ? '✓' : '○'
+      const statusColor = isStreaming
+        ? theme.primary
+        : isComplete
+          ? theme.foreground
+          : theme.muted
+
+      let statusText = 'Selecting best'
+      let reason: string | undefined
+
+      // If complete, try to show which implementation was selected
+      if (isComplete && siblingBlocks) {
+        const blocks = agentBlock.blocks ?? []
+        const lastBlock = blocks[blocks.length - 1] as
+          | { input: { implementationId: string; reason: string } }
+          | undefined
+        const implementationId = lastBlock?.input?.implementationId
+        if (implementationId) {
+          // Convert letter to index: 'A' -> 0, 'B' -> 1, etc.
+          const letterIndex = implementationId.charCodeAt(0) - 65
+          const implementors = siblingBlocks.filter(
+            (b) => b.type === 'agent' && isImplementorAgent(b.agentType),
+          ) as AgentContentBlock[]
+
+          const selectedAgent = implementors[letterIndex]
+          if (selectedAgent) {
+            const index = getImplementorIndex(
+              selectedAgent.agentId,
+              selectedAgent.agentType,
+              siblingBlocks,
+            )
+            // Just show "Selected Prompt #N" without repeating the prompt text
+            statusText = index !== undefined ? `Selected Strategy #${index + 1}` : 'Selected'
+            reason = lastBlock?.input?.reason
+          }
+        }
+      }
+
+      return (
+        <box
+          key={keyPrefix}
+          style={{
+            flexDirection: 'column',
+            gap: 0,
+            width: '100%',
+            marginTop: 1,
+          }}
+        >
+          <text style={{ wrapMode: 'word' }}>
+            <span fg={statusColor}>{statusIndicator}</span>
+            <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
+              {' '}
+              {statusText}
+            </span>
+          </text>
+          {reason && (
+            <text
+              style={{
+                wrapMode: 'word',
+                fg: theme.foreground,
+                marginLeft: 2,
+              }}
+            >
+              {reason}
+            </text>
+          )}
+        </box>
+      )
+    }
+
+    // Render implementor agents as simple tool calls
+    if (isImplementorAgent(agentBlock.agentType)) {
+      const isStreaming =
+        agentBlock.status === 'running' ||
+        streamingAgents.has(agentBlock.agentId)
+      const isComplete = agentBlock.status === 'complete'
+      const isFailed = agentBlock.status === 'failed'
+      const implementorIndex = siblingBlocks
+        ? getImplementorIndex(
+            agentBlock.agentId,
+            agentBlock.agentType,
+            siblingBlocks,
+          )
+        : undefined
+      const displayName = getImplementorDisplayName(
+        agentBlock.agentType,
+        implementorIndex,
+        agentBlock.initialPrompt,
+        availableWidth,
+      )
+      const statusIndicator = isStreaming
+        ? '●'
+        : isFailed
+          ? '✗'
+          : isComplete
+            ? '✓'
+            : '○'
+      const statusColor = isStreaming
+        ? theme.primary
+        : isFailed
+          ? 'red'
+          : isComplete
+            ? theme.foreground
+            : theme.muted
+
+      // Split "Strategy #N: prompt" into parts for separate styling
+      const strategyMatch = displayName.match(/^(Strategy #\d+:)(.*)$/)
+      const strategyLabel = strategyMatch ? strategyMatch[1] : displayName
+      const strategyPrompt = strategyMatch ? strategyMatch[2] : ''
+
+      return (
+        <box
+          key={keyPrefix}
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            width: '100%',
+          }}
+        >
+          <text style={{ wrapMode: 'word' }}>
+            <span fg={statusColor}>{statusIndicator}</span>
+            <span fg={theme.foreground} attributes={TextAttributes.BOLD}>
+              {' '}
+              {strategyLabel}
+            </span>
+            {strategyPrompt && (
+              <span fg={theme.foreground}>{strategyPrompt}</span>
+            )}
+          </text>
+        </box>
+      )
+    }
+
+    const isCollapsed = agentBlock.isCollapsed ?? false
+    const isStreaming =
+      agentBlock.status === 'running' || streamingAgents.has(agentBlock.agentId)
+
+    const allTextContent =
+      agentBlock.blocks
+        ?.filter(isTextBlock)
+        .map((nested) => nested.content)
+        .join('') || ''
+
+    const lines = allTextContent.split('\n').filter((line) => line.trim())
+    const firstLine = lines[0] || ''
+
+    const streamingPreview = isStreaming
+      ? agentBlock.initialPrompt
+        ? sanitizePreview(agentBlock.initialPrompt)
+        : `${sanitizePreview(firstLine)}...`
+      : ''
+
+    const finishedPreview =
+      !isStreaming && isCollapsed && agentBlock.initialPrompt
+        ? sanitizePreview(agentBlock.initialPrompt)
+        : ''
+
+    const isActive = isStreaming || agentBlock.status === 'running'
+    const isFailed = agentBlock.status === 'failed'
+    const statusLabel = isActive
+      ? 'running'
+      : agentBlock.status === 'complete'
+        ? 'completed'
+        : isFailed
+          ? 'failed'
+          : agentBlock.status
+    const statusColor = isActive
+      ? theme.primary
+      : isFailed
+        ? 'red'
+        : theme.muted
+    const statusIndicator = isActive ? '●' : isFailed ? '✗' : '✓'
+
+    const onToggle = useCallback(() => {
+      onToggleCollapsed(agentBlock.agentId)
+    }, [onToggleCollapsed, agentBlock.agentId])
+
+    return (
+      <box key={keyPrefix} style={{ flexDirection: 'column', gap: 0 }}>
+        <AgentBranchItem
+          name={agentBlock.agentName}
+          prompt={agentBlock.initialPrompt}
+          agentId={agentBlock.agentId}
+          isCollapsed={isCollapsed}
+          isStreaming={isStreaming}
+          streamingPreview={streamingPreview}
+          finishedPreview={finishedPreview}
+          statusLabel={statusLabel ?? undefined}
+          statusColor={statusColor}
+          statusIndicator={statusIndicator}
+          onToggle={onToggle}
+        >
+          <AgentBody
+            agentBlock={agentBlock}
+            keyPrefix={keyPrefix}
+            parentIsStreaming={isStreaming}
+            availableWidth={availableWidth}
+            markdownPalette={markdownPalette}
+            streamingAgents={streamingAgents}
+            onToggleCollapsed={onToggleCollapsed}
+            onBuildFast={onBuildFast}
+            onBuildMax={onBuildMax}
+            isLastMessage={isLastMessage}
+          />
+        </AgentBranchItem>
+      </box>
+    )
+  },
+)
+
+interface UserContentWithCopyButtonProps {
+  content: string
+  messageId: string
+  isLoading: boolean
+  isComplete?: boolean
+  isUser: boolean
+  textColor: string
+  codeBlockWidth: number
+  palette: MarkdownPalette
+  showCopyButton: boolean
+}
+
+/**
+ * Renders user content with an inline copy button.
+ * The text flows naturally with word wrapping, and the copy button appears inline after the content.
+ */
+const UserContentWithCopyButton = memo(
+  ({
+    content,
+    messageId,
+    isLoading,
+    isComplete,
+    isUser,
+    textColor,
+    codeBlockWidth,
+    palette,
+    showCopyButton,
+  }: UserContentWithCopyButtonProps) => {
     const isStreamingMessage = isLoading || !isComplete
     const normalizedContent = isStreamingMessage
       ? trimTrailingNewlines(content)
       : content.trim()
-    const displayContent = renderContentWithMarkdown(
-      normalizedContent,
-      isStreamingMessage,
-      markdownOptions,
+
+    if (!showCopyButton) {
+      return (
+        <text
+          key={`message-content-${messageId}`}
+          style={{ wrapMode: 'word', fg: textColor }}
+          attributes={isUser ? TextAttributes.ITALIC : undefined}
+        >
+          <ContentWithMarkdown
+            content={normalizedContent}
+            isStreaming={isStreamingMessage}
+            codeBlockWidth={codeBlockWidth}
+            palette={palette}
+          />
+        </text>
+      )
+    }
+
+    // Render text content with inline copy icon - clicking the icon copies the text
+    return (
+      <UserTextWithInlineCopy
+        messageId={messageId}
+        content={content}
+        normalizedContent={normalizedContent}
+        isStreamingMessage={isStreamingMessage}
+        textColor={textColor}
+        codeBlockWidth={codeBlockWidth}
+        palette={palette}
+      />
     )
+  },
+)
+
+interface UserTextWithInlineCopyProps {
+  messageId: string
+  content: string
+  normalizedContent: string
+  isStreamingMessage: boolean
+  textColor: string
+  codeBlockWidth: number
+  palette: MarkdownPalette
+}
+
+/**
+ * Renders user text content with an inline copy icon at the end.
+ * Clicking the copy icon copies the text to clipboard.
+ */
+const UserTextWithInlineCopy = memo(
+  ({
+    messageId,
+    content,
+    normalizedContent,
+    isStreamingMessage,
+    textColor,
+    codeBlockWidth,
+    palette,
+  }: UserTextWithInlineCopyProps) => {
+    const copyButton = useCopyButton(content)
+
     return (
       <text
         key={`message-content-${messageId}`}
-        style={{ wrapMode: 'word', fg: resolvedTextColor }}
+        style={{ wrapMode: 'word', fg: textColor }}
+        onMouseDown={copyButton.handleCopy}
+        onMouseOver={copyButton.handleMouseOver}
+        onMouseOut={copyButton.handleMouseOut}
       >
-        {displayContent}
+        <span attributes={TextAttributes.ITALIC}>
+          <ContentWithMarkdown
+            content={normalizedContent}
+            isStreaming={isStreamingMessage}
+            codeBlockWidth={codeBlockWidth}
+            palette={palette}
+          />
+        </span>
+        <CopyButton textToCopy={content} isCopied={copyButton.isCopied} isHovered={copyButton.isHovered} />
       </text>
     )
-  }
+  },
+)
 
-  const renderBlock = (block: ContentBlock, idx: number) => {
+interface UserBlockTextWithInlineCopyProps {
+  content: string
+  contentToCopy: string
+  isStreaming: boolean
+  textColor: string
+  codeBlockWidth: number
+  palette: MarkdownPalette
+  marginTop: number
+  marginBottom: number
+}
+
+/**
+ * Renders a text block for user messages with an inline copy icon at the end.
+ */
+const UserBlockTextWithInlineCopy = memo(
+  ({
+    content,
+    contentToCopy,
+    isStreaming,
+    textColor,
+    codeBlockWidth,
+    palette,
+    marginTop,
+    marginBottom,
+  }: UserBlockTextWithInlineCopyProps) => {
+    const copyButton = useCopyButton(contentToCopy)
+
+    return (
+      <text
+        style={{
+          wrapMode: 'word',
+          fg: textColor,
+          marginTop,
+          marginBottom,
+        }}
+        onMouseDown={copyButton.handleCopy}
+        onMouseOver={copyButton.handleMouseOver}
+        onMouseOut={copyButton.handleMouseOut}
+      >
+        <span attributes={TextAttributes.ITALIC}>
+          <ContentWithMarkdown
+            content={content}
+            isStreaming={isStreaming}
+            codeBlockWidth={codeBlockWidth}
+            palette={palette}
+          />
+        </span>
+        <CopyButton textToCopy={contentToCopy} isCopied={copyButton.isCopied} isHovered={copyButton.isHovered} />
+      </text>
+    )
+  },
+)
+
+interface SingleBlockProps {
+  block: ContentBlock
+  idx: number
+  messageId: string
+  blocks?: ContentBlock[]
+  isLoading: boolean
+  isComplete?: boolean
+  isUser: boolean
+  textColor: string
+  availableWidth: number
+  markdownPalette: MarkdownPalette
+  streamingAgents: Set<string>
+  onToggleCollapsed: (id: string) => void
+  onBuildFast: () => void
+  onBuildMax: () => void
+  isLastMessage?: boolean
+  contentToCopy?: string
+}
+
+const SingleBlock = memo(
+  ({
+    block,
+    idx,
+    messageId,
+    blocks,
+    isLoading,
+    isComplete,
+    isUser,
+    textColor,
+    availableWidth,
+    markdownPalette,
+    streamingAgents,
+    onToggleCollapsed,
+    onBuildFast,
+    onBuildMax,
+    isLastMessage,
+    contentToCopy,
+  }: SingleBlockProps): ReactNode => {
+    const theme = useTheme()
+    const codeBlockWidth = Math.max(10, availableWidth - 8)
+
     switch (block.type) {
       case 'text': {
+        // Skip raw rendering for reasoning; grouped above into <Thinking>
+        if (isReasoningTextBlock(block)) {
+          return null
+        }
+        const textBlock = block as TextContentBlock
         const isStreamingText = isLoading || !isComplete
-        const rawContent = isStreamingText
-          ? trimTrailingNewlines(block.content)
-          : block.content.trim()
+        const filteredContent = isStreamingText
+          ? trimTrailingNewlines(textBlock.content)
+          : textBlock.content.trim()
         const renderKey = `${messageId}-text-${idx}`
-        const renderedContent = renderContentWithMarkdown(
-          rawContent,
-          isStreamingText,
-          markdownOptions,
-        )
         const prevBlock = idx > 0 && blocks ? blocks[idx - 1] : null
         const marginTop =
           prevBlock && (prevBlock.type === 'tool' || prevBlock.type === 'agent')
             ? 0
-            : block.marginTop ?? 0
-        const marginBottom = block.marginBottom ?? 0
-        const explicitColor =
-          typeof (block as any).color === 'string'
-            ? ((block as any).color as string)
-            : undefined
-        const blockTextColor = explicitColor ?? resolvedTextColor
+            : textBlock.marginTop ?? 0
+        const marginBottom = textBlock.marginBottom ?? 0
+        const explicitColor = textBlock.color
+        const blockTextColor = explicitColor ?? textColor
+        
+        // If this block should have an inline copy icon, use the special component
+        if (contentToCopy) {
+          return (
+            <UserBlockTextWithInlineCopy
+              key={renderKey}
+              content={filteredContent}
+              contentToCopy={contentToCopy}
+              isStreaming={isStreamingText}
+              textColor={blockTextColor}
+              codeBlockWidth={codeBlockWidth}
+              palette={markdownPalette}
+              marginTop={marginTop}
+              marginBottom={marginBottom}
+            />
+          )
+        }
+        
         return (
           <text
             key={renderKey}
@@ -587,9 +1070,29 @@ export const MessageBlock = ({
               marginTop,
               marginBottom,
             }}
+            attributes={isUser ? TextAttributes.ITALIC : undefined}
           >
-            {renderedContent}
+            <ContentWithMarkdown
+              content={filteredContent}
+              isStreaming={isStreamingText}
+              codeBlockWidth={codeBlockWidth}
+              palette={markdownPalette}
+            />
           </text>
+        )
+      }
+
+      case 'plan': {
+        return (
+          <box key={`${messageId}-plan-${idx}`} style={{ width: '100%' }}>
+            <PlanBox
+              planContent={block.content}
+              availableWidth={availableWidth}
+              markdownPalette={markdownPalette}
+              onBuildFast={onBuildFast}
+              onBuildMax={onBuildMax}
+            />
+          </box>
         )
       }
 
@@ -607,105 +1110,230 @@ export const MessageBlock = ({
               width: '100%',
             }}
           >
-            {block.render({ textColor: resolvedTextColor, theme })}
+            {block.render({ textColor, theme })}
           </box>
         )
       }
 
       case 'tool': {
-        const isLastBranch = !hasBranchAfter(blocks, idx)
-        return renderToolBranch(
-          block,
-          0,
-          isLastBranch,
-          `${messageId}-tool-${block.toolCallId}`,
-          [],
+        // Handled in BlocksRenderer grouping logic
+        return null
+      }
+
+      case 'ask-user': {
+        return (
+          <AskUserBranch
+            key={`${messageId}-ask-user-${idx}`}
+            block={block}
+            availableWidth={availableWidth}
+          />
+        )
+      }
+
+      case 'image': {
+        return (
+          <ImageBlock
+            key={`${messageId}-image-${idx}`}
+            block={block as ImageContentBlock}
+            availableWidth={availableWidth}
+          />
         )
       }
 
       case 'agent': {
-        const isLastBranch = !hasBranchAfter(blocks, idx)
-        return renderAgentBranch(
-          block,
-          0,
-          isLastBranch,
-          `${messageId}-agent-${block.agentId}`,
-          [],
+        return (
+          <AgentBranchWrapper
+            key={`${messageId}-agent-${block.agentId}`}
+            agentBlock={block}
+            keyPrefix={`${messageId}-agent-${block.agentId}`}
+            availableWidth={availableWidth}
+            markdownPalette={markdownPalette}
+            streamingAgents={streamingAgents}
+            onToggleCollapsed={onToggleCollapsed}
+            onBuildFast={onBuildFast}
+            onBuildMax={onBuildMax}
+            siblingBlocks={blocks}
+            isLastMessage={isLastMessage}
+          />
         )
       }
 
       case 'agent-list': {
-        const isLastBranch = !hasBranchAfter(blocks, idx)
-        return renderAgentListBranch(
-          block,
-          isLastBranch,
-          `${messageId}-agent-list-${block.id}`,
+        return (
+          <AgentListBranch
+            key={`${messageId}-agent-list-${block.id}`}
+            agentListBlock={block}
+            keyPrefix={`${messageId}-agent-list-${block.id}`}
+            onToggleCollapsed={onToggleCollapsed}
+          />
         )
       }
 
       default:
         return null
     }
-  }
+  },
+)
 
-  return (
-    <>
-      {isUser && (
-        <text
-          attributes={TextAttributes.DIM}
-          style={{
-            wrapMode: 'none',
-            fg: timestampColor,
-            marginTop: 0,
-            marginBottom: 0,
-            alignSelf: 'flex-start',
-          }}
-        >
-          {`[${timestamp}]`}
-        </text>
-      )}
-      {blocks ? (
-        <box style={{ flexDirection: 'column', gap: 0, width: '100%' }}>
-          {blocks.map(renderBlock)}
-        </box>
-      ) : (
-        renderSimpleContent()
-      )}
-      {isAi && (
-        <>
-          {/* Show elapsed time while streaming */}
-          {isLoading && !isComplete && elapsedSeconds > 0 && (
-            <text
-              attributes={TextAttributes.DIM}
-              style={{
-                wrapMode: 'none',
-                fg: theme.secondary,
-                marginTop: 0,
-                marginBottom: 0,
-                alignSelf: 'flex-start',
-              }}
-            >
-              {elapsedSeconds}s
-            </text>
-          )}
-          {/* Show completion time and credits when complete */}
-          {isComplete && (
-            <text
-              attributes={TextAttributes.DIM}
-              style={{
-                wrapMode: 'none',
-                fg: theme.secondary,
-                marginTop: 0,
-                marginBottom: 0,
-                alignSelf: 'flex-start',
-              }}
-            >
-              {completionTime}
-              {credits && ` • ${credits} credits`}
-            </text>
-          )}
-        </>
-      )}
-    </>
-  )
+interface BlocksRendererProps {
+  sourceBlocks: ContentBlock[]
+  messageId: string
+  isLoading: boolean
+  isComplete?: boolean
+  isUser: boolean
+  textColor: string
+  availableWidth: number
+  markdownPalette: MarkdownPalette
+  streamingAgents: Set<string>
+  onToggleCollapsed: (id: string) => void
+  onBuildFast: () => void
+  onBuildMax: () => void
+  isLastMessage?: boolean
+  contentToCopy?: string
 }
+
+const BlocksRenderer = memo(
+  ({
+    sourceBlocks,
+    messageId,
+    isLoading,
+    isComplete,
+    isUser,
+    textColor,
+    availableWidth,
+    markdownPalette,
+    streamingAgents,
+    onToggleCollapsed,
+    onBuildFast,
+    onBuildMax,
+    isLastMessage,
+    contentToCopy,
+  }: BlocksRendererProps) => {
+    const nodes: React.ReactNode[] = []
+    
+    // Find the index of the last text block for inline copy icon
+    const lastTextBlockIndex = contentToCopy
+      ? sourceBlocks.reduceRight(
+          (acc, block, idx) => (acc === -1 && block.type === 'text' ? idx : acc),
+          -1,
+        )
+      : -1
+
+    for (let i = 0; i < sourceBlocks.length; ) {
+      const block = sourceBlocks[i]
+      // Handle reasoning text blocks
+      if (isReasoningTextBlock(block)) {
+        const start = i
+        const reasoningBlocks: Extract<ContentBlock, { type: 'text' }>[] = []
+        while (i < sourceBlocks.length) {
+          const currentBlock = sourceBlocks[i]
+          if (!isReasoningTextBlock(currentBlock)) break
+          reasoningBlocks.push(currentBlock)
+          i++
+        }
+
+        nodes.push(
+          <ThinkingBlock
+            key={`${messageId}-thinking-${start}`}
+            blocks={reasoningBlocks}
+            keyPrefix={messageId}
+            startIndex={start}
+            onToggleCollapsed={onToggleCollapsed}
+            availableWidth={availableWidth}
+            isNested={false}
+          />,
+        )
+        continue
+      }
+      // Handle image blocks
+      if (isImageBlock(block)) {
+        nodes.push(
+          <ImageBlock
+            key={`${messageId}-image-${i}`}
+            block={block}
+            availableWidth={availableWidth}
+          />,
+        )
+        i++
+        continue
+      }
+
+      if (block.type === 'tool') {
+        const start = i
+        const group: Extract<ContentBlock, { type: 'tool' }>[] = []
+        while (i < sourceBlocks.length) {
+          const currentBlock = sourceBlocks[i]
+          if (!isToolBlock(currentBlock)) break
+          group.push(currentBlock)
+          i++
+        }
+
+        const groupNodes = group.map((toolBlock) => (
+          <ToolBranch
+            key={`${messageId}-tool-${toolBlock.toolCallId}`}
+            toolBlock={toolBlock}
+            keyPrefix={`${messageId}-tool-${toolBlock.toolCallId}`}
+            availableWidth={availableWidth}
+            streamingAgents={streamingAgents}
+            onToggleCollapsed={onToggleCollapsed}
+            markdownPalette={markdownPalette}
+          />
+        ))
+
+        const nonNullGroupNodes = groupNodes.filter(
+          Boolean,
+        ) as React.ReactNode[]
+        if (nonNullGroupNodes.length > 0) {
+          const hasRenderableBefore =
+            start > 0 && isRenderableTimelineBlock(sourceBlocks[start - 1])
+          // Check for any subsequent renderable blocks without allocating a slice
+          let hasRenderableAfter = false
+          for (let j = i; j < sourceBlocks.length; j++) {
+            if (isRenderableTimelineBlock(sourceBlocks[j])) {
+              hasRenderableAfter = true
+              break
+            }
+          }
+          nodes.push(
+            <box
+              key={`${messageId}-tool-group-${start}`}
+              style={{
+                flexDirection: 'column',
+                gap: 0,
+                marginTop: hasRenderableBefore ? 1 : 0,
+                marginBottom: hasRenderableAfter ? 1 : 0,
+              }}
+            >
+              {nonNullGroupNodes}
+            </box>,
+          )
+        }
+        continue
+      }
+
+      nodes.push(
+        <SingleBlock
+          key={`${messageId}-block-${i}`}
+          block={block}
+          idx={i}
+          messageId={messageId}
+          blocks={sourceBlocks}
+          isLoading={isLoading}
+          isComplete={isComplete}
+          isUser={isUser}
+          textColor={textColor}
+          availableWidth={availableWidth}
+          markdownPalette={markdownPalette}
+          streamingAgents={streamingAgents}
+          onToggleCollapsed={onToggleCollapsed}
+          onBuildFast={onBuildFast}
+          onBuildMax={onBuildMax}
+          isLastMessage={isLastMessage}
+          contentToCopy={i === lastTextBlockIndex ? contentToCopy : undefined}
+        />,
+      )
+      i++
+    }
+    return nodes
+  },
+)

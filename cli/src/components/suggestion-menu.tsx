@@ -1,6 +1,8 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 
+import { Button } from './button'
 import { HighlightedSubsequenceText } from './highlighted-text'
+import { useTerminalDimensions } from '../hooks/use-terminal-dimensions'
 import { useTheme } from '../hooks/use-theme'
 
 export interface SuggestionItem {
@@ -16,6 +18,7 @@ interface SuggestionMenuProps {
   selectedIndex: number
   maxVisible: number
   prefix?: string
+  onItemClick?: (index: number) => void
 }
 
 export const SuggestionMenu = ({
@@ -23,17 +26,28 @@ export const SuggestionMenu = ({
   selectedIndex,
   maxVisible,
   prefix = '/',
+  onItemClick,
 }: SuggestionMenuProps) => {
   const theme = useTheme()
+  const { terminalWidth } = useTerminalDimensions()
+  const screenPadding = 4
+  const menuWidth = Math.max(10, terminalWidth - screenPadding * 2)
+
+  // Hover state: only highlight on hover after user has moved mouse
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
+  const [hasHoveredSinceOpen, setHasHoveredSinceOpen] = useState(false)
+
+  // Reset hover state when items change (new menu session)
+  useEffect(() => {
+    setHasHoveredSinceOpen(false)
+    setHoveredIndex(null)
+  }, [items])
+
   if (items.length === 0) {
     return null
   }
 
   const effectivePrefix = prefix ?? ''
-  const maxLabelLength = items.reduce((max, item) => {
-    const totalLength = effectivePrefix.length + item.label.length
-    return totalLength > max ? totalLength : max
-  }, 0)
 
   const clampedSelected = Math.min(
     Math.max(selectedIndex, 0),
@@ -46,53 +60,131 @@ export const SuggestionMenu = ({
   const start = Math.max(0, Math.min(idealStart, maxStart))
   const visibleItems = items.slice(start, start + visibleCount)
 
+  // Calculate max label length for alignment
+  const maxLabelLength = Math.max(
+    ...visibleItems.map(
+      (item) => effectivePrefix.length + item.label.length,
+    ),
+  )
+
+  // Find the longest description to determine if we can use same-line layout
+  const maxDescriptionLength = Math.max(
+    ...visibleItems.map((item) => item.description.length),
+  )
+
+  // Check if all items can fit on same line with aligned descriptions
+  const minWidthForSameLine = maxLabelLength + 2 + maxDescriptionLength
+  const useSameLine = menuWidth >= minWidthForSameLine
+
   const renderSuggestionItem = (item: SuggestionItem, idx: number) => {
     const absoluteIndex = start + idx
     const isSelected = absoluteIndex === clampedSelected
+    const isHovered = hasHoveredSinceOpen && absoluteIndex === hoveredIndex
+    const isHighlighted = isSelected || isHovered
     const labelLength = effectivePrefix.length + item.label.length
-    const paddingLength = Math.max(maxLabelLength - labelLength + 2, 2)
-    const padding = ' '.repeat(paddingLength)
-    const textColor = isSelected ? theme.foreground : theme.inputFg
-    const descriptionColor = isSelected ? theme.foreground : theme.muted
+    const textColor = isHighlighted ? theme.foreground : theme.inputFg
+    const descriptionColor = isHighlighted ? theme.foreground : theme.muted
     const highlightColor = theme.primary
 
-    return (
-      <box
-        key={item.id}
-        style={{
-          flexDirection: 'column',
-          gap: 0,
-          paddingLeft: 1,
-          paddingRight: 1,
-          paddingTop: 0,
-          paddingBottom: 0,
-          backgroundColor: isSelected ? theme.agentFocusedBg : theme.background,
-          width: '100%',
-        }}
-      >
-        <text
+    const handleClick = onItemClick ? () => onItemClick(absoluteIndex) : undefined
+    const handleMouseOver = () => {
+      setHoveredIndex(absoluteIndex)
+      setHasHoveredSinceOpen(true)
+    }
+
+    if (useSameLine) {
+      // Calculate padding to align descriptions
+      const paddingLength = maxLabelLength - labelLength
+      const padding = ' '.repeat(paddingLength)
+      // Wide terminal: description on same line with 2-space gap
+      return (
+        <Button
+          key={item.id}
+          onClick={handleClick}
+          onMouseOver={handleMouseOver}
           style={{
-            fg: textColor,
-            marginBottom: 0,
+            flexDirection: 'column',
+            gap: 0,
+            paddingLeft: 1,
+            paddingRight: 1,
+            paddingTop: 0,
+            paddingBottom: 0,
+            backgroundColor: isHighlighted ? theme.surfaceHover : theme.background,
+            width: '100%',
           }}
         >
-          <span fg={theme.primary}>{effectivePrefix}</span>
-          <HighlightedSubsequenceText
-            text={item.label}
-            indices={item.labelHighlightIndices}
-            color={textColor}
-            highlightColor={highlightColor}
-          />
-          <span>{padding}</span>
-          <HighlightedSubsequenceText
-            text={item.description}
-            indices={item.descriptionHighlightIndices}
-            color={descriptionColor}
-            highlightColor={highlightColor}
-          />
-        </text>
-      </box>
-    )
+          <text
+            style={{
+              fg: textColor,
+              marginBottom: 0,
+            }}
+          >
+            <span fg={theme.primary}>{effectivePrefix}</span>
+            <HighlightedSubsequenceText
+              text={item.label}
+              indices={item.labelHighlightIndices}
+              color={textColor}
+              highlightColor={highlightColor}
+            />
+            <span>{padding}  </span>
+            <HighlightedSubsequenceText
+              text={item.description}
+              indices={item.descriptionHighlightIndices}
+              color={descriptionColor}
+              highlightColor={highlightColor}
+            />
+          </text>
+        </Button>
+      )
+    } else {
+      // Narrow terminal: description on next line
+      return (
+        <Button
+          key={item.id}
+          onClick={handleClick}
+          onMouseOver={handleMouseOver}
+          style={{
+            flexDirection: 'column',
+            gap: 0,
+            paddingLeft: 1,
+            paddingRight: 1,
+            paddingTop: 0,
+            paddingBottom: 0,
+            backgroundColor: isHighlighted ? theme.surfaceHover : theme.background,
+            width: '100%',
+          }}
+        >
+          <text
+            style={{
+              fg: textColor,
+              marginBottom: 0,
+            }}
+          >
+            <span fg={theme.primary}>{effectivePrefix}</span>
+            <HighlightedSubsequenceText
+              text={item.label}
+              indices={item.labelHighlightIndices}
+              color={textColor}
+              highlightColor={highlightColor}
+            />
+          </text>
+          <text
+            style={{
+              fg: descriptionColor,
+              marginBottom: 0,
+              marginLeft: 2,
+            }}
+          >
+            <HighlightedSubsequenceText
+              text={item.description}
+              indices={item.descriptionHighlightIndices}
+              color={descriptionColor}
+              highlightColor={highlightColor}
+            />
+          </text>
+        </Button>
+      )
+    }
   }
 
   return (
@@ -107,17 +199,9 @@ export const SuggestionMenu = ({
         backgroundColor: theme.surface,
         width: '100%',
       }}
+      onMouseOut={() => setHoveredIndex(null)}
     >
-      <box
-        style={{
-          flexDirection: 'column',
-          gap: 0,
-          backgroundColor: theme.background,
-          width: '100%',
-        }}
-      >
-        {visibleItems.map(renderSuggestionItem)}
-      </box>
+      {visibleItems.map(renderSuggestionItem)}
     </box>
   )
 }

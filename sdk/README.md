@@ -28,7 +28,7 @@ async function main() {
   })
 
   // First run
-  const run1 = await client.run({
+  const runState1 = await client.run({
     // The agent id. Any agent on the store (https://codebuff.com/store)
     agent: 'codebuff/base@0.0.16',
     prompt: 'Create a simple calculator class',
@@ -39,10 +39,10 @@ async function main() {
   })
 
   // Continue the same session with a follow-up
-  const run2 = await client.run({
+  const runOrError2 = await client.run({
     agent: 'codebuff/base@0.0.16',
     prompt: 'Add unit tests for the calculator',
-    previousRun: run1, // <-- this is where your next run differs from the previous run
+    previousRun: runState1, // <-- this is where your next run differs from the previous run
     handleEvent: (event) => {
       console.log('Codebuff Event', JSON.stringify(event))
     },
@@ -77,7 +77,7 @@ async function main() {
     id: 'my-custom-agent',
     model: 'x-ai/grok-4-fast',
     displayName: 'Sentiment analyzer',
-    toolNames: ['fetch_api_data'] // Defined below!
+    toolNames: ['fetch_api_data'], // Defined below!
     instructionsPrompt: `
 1. Describe the different sentiments in the given prompt.
 2. Score the prompt along the following 5 dimensions:
@@ -136,6 +136,56 @@ main()
 
 ## API Reference
 
+### `loadLocalAgents(options)`
+
+Loads agent definitions from `.agents` directories on disk.
+
+```typescript
+import { loadLocalAgents, CodebuffClient } from '@codebuff/sdk'
+
+// Load from default locations (.agents in cwd, parent, or home)
+const agents = await loadLocalAgents({ verbose: true })
+
+// Or load from a specific directory
+// const agents = await loadLocalAgents({ agentsPath: './my-agents' })
+
+// Or load and validate agents (invalid agents are filtered out)
+// const agents = await loadLocalAgents({ validate: true, verbose: true })
+
+// Access source file path for debugging
+for (const agent of Object.values(agents)) {
+  console.log(`${agent.id} loaded from ${agent._sourceFilePath}`)
+}
+
+// Use the loaded agents with client.run()
+const client = new CodebuffClient({ apiKey: process.env.CODEBUFF_API_KEY })
+const result = await client.run({
+  agent: 'my-custom-agent',
+  agentDefinitions: Object.values(agents),
+  prompt: 'Hello',
+})
+```
+
+#### Parameters
+
+- **`agentsPath`** (string, optional): Path to a specific agents directory. If omitted, searches in `{cwd}/.agents`, `{cwd}/../.agents`, and `{homedir}/.agents`.
+- **`verbose`** (boolean, optional): Whether to log errors during loading. Defaults to `false`.
+- **`validate`** (boolean, optional): Whether to validate agents after loading. Invalid agents are filtered out. Defaults to `false`.
+
+#### Returns
+
+Returns a `Promise<LoadedAgents>` - a `Record<string, LoadedAgentDefinition>` of agent definitions keyed by their ID.
+
+Each `LoadedAgentDefinition` extends `AgentDefinition` with:
+- **`_sourceFilePath`** (string): The file path the agent was loaded from
+
+#### Supported File Types
+
+- `.ts`, `.tsx` - TypeScript files (automatically transpiled)
+- `.js`, `.mjs`, `.cjs` - JavaScript files
+
+Files ending in `.d.ts` or `.test.ts` are excluded.
+
 ### `client.run(options)`
 
 Runs a Codebuff agent with the specified options.
@@ -164,9 +214,13 @@ Runs a Codebuff agent with the specified options.
 
 #### Returns
 
-Returns a Promise that resolves to a `RunState` object which can be passed into subsequent runs via the `previousRun` parameter to resume the conversation.
+Returns a Promise that resolves to either a "success" or a "failure" object.
+
+- The "success" object contains a `RunState` object which can be passed into subsequent runs via the `previousRun` parameter to resume the conversation.
+- The "failure" object contains an `Error` object with a `name`, `message`, and `stack` properties.
 
 The `RunState` object contains:
+
 - `sessionState`: Internal state to be passed to the next run
 - `output`: The agent's output (text, error, or other types)
 

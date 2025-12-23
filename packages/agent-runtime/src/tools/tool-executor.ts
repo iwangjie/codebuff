@@ -1,17 +1,20 @@
 import { endsAgentStepParam } from '@codebuff/common/tools/constants'
+import { toolParams } from '@codebuff/common/tools/list'
+import { jsonToolResult } from '@codebuff/common/util/messages'
 import { generateCompactId } from '@codebuff/common/util/string'
-import { type ToolCallPart } from 'ai'
 import { cloneDeep } from 'lodash'
-import z from 'zod/v4'
-import { convertJsonSchemaToZod } from 'zod-from-json-schema'
 
 import { checkLiveUserInput } from '../live-user-inputs'
 import { getMCPToolData } from '../mcp'
-import { codebuffToolDefs } from './definitions/list'
+import { getAgentShortName } from '../templates/prompts'
 import { codebuffToolHandlers } from './handlers/list'
+import { ensureZodSchema } from './prompts'
+
+import type { AgentTemplateType } from '@codebuff/common/types/session-state'
 
 import type { AgentTemplate } from '../templates/types'
 import type { CodebuffToolHandlerFunction } from './handlers/handler-function-type'
+import type { FileProcessingState } from './handlers/tool/write-file'
 import type { ToolName } from '@codebuff/common/tools/constants'
 import type {
   ClientToolCall,
@@ -23,16 +26,16 @@ import type {
   AgentRuntimeDeps,
   AgentRuntimeScopedDeps,
 } from '@codebuff/common/types/contracts/agent-runtime'
-import type { Message } from '@codebuff/common/types/messages/codebuff-message'
-import type {
-  ToolResultOutput,
-  ToolResultPart,
-} from '@codebuff/common/types/messages/content-part'
+import type { Logger } from '@codebuff/common/types/contracts/logger'
+import type { ToolMessage } from '@codebuff/common/types/messages/codebuff-message'
+import type { ToolResultOutput } from '@codebuff/common/types/messages/content-part'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
+import type { AgentState, Subgoal } from '@codebuff/common/types/session-state'
 import type {
-  customToolDefinitionsSchema,
+  CustomToolDefinitions,
   ProjectFileContext,
 } from '@codebuff/common/util/file'
+import type { ToolCallPart, ToolSet } from 'ai'
 
 export type CustomToolCall = {
   toolName: string
@@ -51,50 +54,21 @@ export function parseRawToolCall<T extends ToolName = ToolName>(params: {
     toolCallId: string
     input: Record<string, unknown>
   }
-  autoInsertEndStepParam?: boolean
 }): CodebuffToolCall<T> | ToolCallError {
-  const { rawToolCall, autoInsertEndStepParam = false } = params
+  const { rawToolCall } = params
   const toolName = rawToolCall.toolName
 
-  if (!(toolName in codebuffToolDefs)) {
-    return {
-      toolName,
-      toolCallId: rawToolCall.toolCallId,
-      input: rawToolCall.input,
-      error: `Tool ${toolName} not found`,
-    }
-  }
-  const validName = toolName as T
+  const processedParameters = rawToolCall.input
+  const paramsSchema = toolParams[toolName].inputSchema
 
-  const processedParameters: Record<string, any> = {}
-  for (const [param, val] of Object.entries(rawToolCall.input ?? {})) {
-    processedParameters[param] = val
-  }
-
-  // Add the required codebuff_end_step parameter with the correct value for this tool if requested
-  if (autoInsertEndStepParam) {
-    processedParameters[endsAgentStepParam] =
-      codebuffToolDefs[validName].endsAgentStep
-  }
-
-  const paramsSchema = codebuffToolDefs[validName].endsAgentStep
-    ? (
-        codebuffToolDefs[validName]
-          .parameters satisfies z.ZodObject as z.ZodObject
-      ).extend({
-        [endsAgentStepParam]: z.literal(
-          codebuffToolDefs[validName].endsAgentStep,
-        ),
-      })
-    : codebuffToolDefs[validName].parameters
   const result = paramsSchema.safeParse(processedParameters)
 
   if (!result.success) {
     return {
-      toolName: validName,
+      toolName,
       toolCallId: rawToolCall.toolCallId,
       input: rawToolCall.input,
-      error: `Invalid parameters for ${validName}: ${JSON.stringify(
+      error: `Invalid parameters for ${toolName}: ${JSON.stringify(
         result.error.issues,
         null,
         2,
@@ -107,7 +81,7 @@ export function parseRawToolCall<T extends ToolName = ToolName>(params: {
   }
 
   return {
-    toolName: validName,
+    toolName,
     input: result.data,
     toolCallId: rawToolCall.toolCallId,
   } as CodebuffToolCall<T>
@@ -116,26 +90,41 @@ export function parseRawToolCall<T extends ToolName = ToolName>(params: {
 export type ExecuteToolCallParams<T extends string = ToolName> = {
   toolName: T
   input: Record<string, unknown>
-  toolCalls: (CodebuffToolCall | CustomToolCall)[]
-  toolResults: ToolResultPart[]
-  toolResultsToAddAfterStream: ToolResultPart[]
-  previousToolCallFinished: Promise<void>
-  agentTemplate: AgentTemplate
-  fileContext: ProjectFileContext
-  runId: string
-  agentStepId: string
-  clientSessionId: string
-  userInputId: string
-  fullResponse: string
-  repoId: string | undefined
-  repoUrl: string | undefined
-  onResponseChunk: (chunk: string | PrintModeEvent) => void
-  state: Record<string, any>
-  userId: string | undefined
   autoInsertEndStepParam?: boolean
   excludeToolFromMessageHistory?: boolean
-  fetch: typeof globalThis.fetch
+
+  agentContext: Record<string, Subgoal>
+  agentState: AgentState
+  agentStepId: string
+  ancestorRunIds: string[]
+  agentTemplate: AgentTemplate
+  clientSessionId: string
+  fileContext: ProjectFileContext
+  fileProcessingState: FileProcessingState
+  fingerprintId: string
   fromHandleSteps?: boolean
+  fullResponse: string
+  localAgentTemplates: Record<string, AgentTemplate>
+  logger: Logger
+  previousToolCallFinished: Promise<void>
+  prompt: string | undefined
+  repoId: string | undefined
+  repoUrl: string | undefined
+  runId: string
+  signal: AbortSignal
+  system: string
+  tools: ToolSet
+  toolCallId: string | undefined
+  toolCalls: (CodebuffToolCall | CustomToolCall)[]
+  toolResults: ToolMessage[]
+  toolResultsToAddAfterStream: ToolMessage[]
+  skipDirectResultPush?: boolean
+  userId: string | undefined
+  userInputId: string
+
+  fetch: typeof globalThis.fetch
+  onCostCalculated: (credits: number) => Promise<void>
+  onResponseChunk: (chunk: string | PrintModeEvent) => void
 } & AgentRuntimeDeps &
   AgentRuntimeScopedDeps
 
@@ -145,49 +134,56 @@ export function executeToolCall<T extends ToolName>(
   const {
     toolName,
     input,
+    excludeToolFromMessageHistory = false,
+    fromHandleSteps = false,
+
+    agentState,
+    agentTemplate,
+    logger,
+    previousToolCallFinished,
     toolCalls,
     toolResults,
     toolResultsToAddAfterStream,
-    previousToolCallFinished,
-    agentTemplate,
-    fileContext,
-    agentStepId,
-    clientSessionId,
     userInputId,
-    fullResponse,
+
+    onCostCalculated,
     onResponseChunk,
-    state,
-    repoId,
-    repoUrl,
-    userId,
-    autoInsertEndStepParam = false,
-    excludeToolFromMessageHistory = false,
     requestToolCall,
-    requestMcpToolData,
-    logger,
-    fromHandleSteps = false,
   } = params
+  const toolCallId = params.toolCallId ?? generateCompactId()
+
   const toolCall: CodebuffToolCall<T> | ToolCallError = parseRawToolCall<T>({
     rawToolCall: {
       toolName,
-      toolCallId: generateCompactId(),
+      toolCallId,
       input,
     },
-    autoInsertEndStepParam,
   })
+
+  // Filter out restricted tools - emit error instead of tool call/result
+  // This prevents the CLI from showing tool calls that the agent doesn't have permission to use
+  if (
+    toolCall.toolName &&
+    !agentTemplate.toolNames.includes(toolCall.toolName) &&
+    !fromHandleSteps
+  ) {
+    // Emit an error event instead of tool call/result pair
+    // The stream parser will convert this to a user message for proper API compliance
+    onResponseChunk({
+      type: 'error',
+      message: `Tool \`${toolName}\` is not currently available. Make sure to only use tools provided at the start of the conversation AND that you most recently have permission to use.`,
+    })
+    return previousToolCallFinished
+  }
+
   if ('error' in toolCall) {
-    const toolResult: ToolResultPart = {
-      type: 'tool-result',
+    const toolResult: ToolMessage = {
+      role: 'tool',
       toolName,
       toolCallId: toolCall.toolCallId,
-      output: [
-        {
-          type: 'json',
-          value: {
-            errorMessage: toolCall.error,
-          },
-        },
-      ],
+      content: jsonToolResult({
+        errorMessage: toolCall.error,
+      }),
     }
     toolResults.push(cloneDeep(toolResult))
     toolResultsToAddAfterStream.push(cloneDeep(toolResult))
@@ -198,45 +194,24 @@ export function executeToolCall<T extends ToolName>(
     return previousToolCallFinished
   }
 
+  // Only emit tool_call event after permission check passes
   onResponseChunk({
     type: 'tool_call',
-    toolCallId: toolCall.toolCallId,
+    toolCallId,
     toolName,
-    input: toolCall.input,
-    // Only include agentId for subagents (agents with a parent)
-    ...(state.agentState?.parentId && { agentId: state.agentState.agentId }),
+    input,
+    agentId: agentState.agentId,
+    parentAgentId: agentState.parentId,
+    includeToolCall: !excludeToolFromMessageHistory,
   })
 
   toolCalls.push(toolCall)
-
-  // Filter out restricted tools
-  if (
-    !agentTemplate.toolNames.includes(toolCall.toolName) &&
-    !fromHandleSteps
-  ) {
-    const toolResult: ToolResultPart = {
-      type: 'tool-result',
-      toolName,
-      toolCallId: toolCall.toolCallId,
-      output: [
-        {
-          type: 'json',
-          value: {
-            errorMessage: `Tool \`${toolName}\` is not currently available. Make sure to only use tools listed in the system instructions.`,
-          },
-        },
-      ],
-    }
-    toolResults.push(cloneDeep(toolResult))
-    toolResultsToAddAfterStream.push(cloneDeep(toolResult))
-    return previousToolCallFinished
-  }
 
   // Cast to any to avoid type errors
   const handler = codebuffToolHandlers[
     toolName
   ] as unknown as CodebuffToolHandlerFunction<T>
-  const { result: toolResultPromise, state: stateUpdate } = handler({
+  const toolResultPromise = handler({
     ...params,
     previousToolCallFinished,
     writeToClient: onResponseChunk,
@@ -255,54 +230,46 @@ export function executeToolCall<T extends ToolName>(
       return clientToolResult.output as CodebuffToolOutput<T>
     }) as any,
     toolCall,
-    getLatestState: () => state,
-    state,
   })
 
-  for (const [key, value] of Object.entries(stateUpdate ?? {})) {
-    if (key === 'agentState' && typeof value === 'object' && value !== null) {
-      // Replace the agentState reference to ensure all updates are captured
-      state.agentState = value
-    } else {
-      state[key] = value
-    }
-  }
-
-  return toolResultPromise.then((result) => {
-    const toolResult: ToolResultPart = {
-      type: 'tool-result',
+  return toolResultPromise.then(async ({ output, creditsUsed }) => {
+    const toolResult: ToolMessage = {
+      role: 'tool',
       toolName,
       toolCallId: toolCall.toolCallId,
-      output: result,
+      content: output,
     }
     logger.debug(
       { input, toolResult },
       `${toolName} tool call & result (${toolResult.toolCallId})`,
     )
-    if (result === undefined) {
-      return
-    }
 
     onResponseChunk({
       type: 'tool_result',
       toolCallId: toolResult.toolCallId,
       toolName: toolResult.toolName,
-      output: toolResult.output,
+      output: toolResult.content,
     })
 
     toolResults.push(toolResult)
 
-    if (!excludeToolFromMessageHistory) {
-      state.messages.push({
-        role: 'tool' as const,
-        content: toolResult,
-      })
+    if (!excludeToolFromMessageHistory && !params.skipDirectResultPush) {
+      agentState.messageHistory.push(toolResult)
+    }
+
+    // After tool completes, resolve any pending creditsUsed promise
+    if (creditsUsed) {
+      onCostCalculated(creditsUsed)
+      logger.debug(
+        { credits: creditsUsed, totalCredits: agentState.creditsUsed },
+        `Added ${creditsUsed} credits from ${toolName} to agent state`,
+      )
     }
   })
 }
 
 export function parseRawCustomToolCall(params: {
-  customToolDefs: z.infer<typeof customToolDefinitionsSchema>
+  customToolDefs: CustomToolDefinitions
   rawToolCall: {
     toolName: string
     toolCallId: string
@@ -313,7 +280,10 @@ export function parseRawCustomToolCall(params: {
   const { customToolDefs, rawToolCall, autoInsertEndStepParam = false } = params
   const toolName = rawToolCall.toolName
 
-  if (!(toolName in customToolDefs) && !toolName.includes('/')) {
+  if (
+    !(customToolDefs && toolName in customToolDefs) &&
+    !toolName.includes('/')
+  ) {
     return {
       toolName,
       toolCallId: rawToolCall.toolCallId,
@@ -330,39 +300,25 @@ export function parseRawCustomToolCall(params: {
   // Add the required codebuff_end_step parameter with the correct value for this tool if requested
   if (autoInsertEndStepParam) {
     processedParameters[endsAgentStepParam] =
-      customToolDefs[toolName].endsAgentStep
+      customToolDefs?.[toolName]?.endsAgentStep
   }
 
-  const jsonSchema = cloneDeep(customToolDefs[toolName].inputJsonSchema)
-  if (customToolDefs[toolName].endsAgentStep) {
-    if (!jsonSchema.properties) {
-      jsonSchema.properties = {}
-    }
-    jsonSchema.properties[endsAgentStepParam] = {
-      const: true,
-      type: 'boolean',
-      description: 'Easp flag must be set to true',
-    }
-    if (!jsonSchema.required) {
-      jsonSchema.required = []
-    }
-    jsonSchema.required.push(endsAgentStepParam)
-  }
-  const paramsSchema = convertJsonSchemaToZod(jsonSchema)
-  const result = paramsSchema.safeParse(
-    processedParameters,
-  ) as z.ZodSafeParseResult<any>
+  const rawSchema = customToolDefs?.[toolName]?.inputSchema
+  if (rawSchema) {
+    const paramsSchema = ensureZodSchema(rawSchema)
+    const result = paramsSchema.safeParse(processedParameters)
 
-  if (!result.success) {
-    return {
-      toolName: toolName,
-      toolCallId: rawToolCall.toolCallId,
-      input: rawToolCall.input,
-      error: `Invalid parameters for ${toolName}: ${JSON.stringify(
-        result.error.issues,
-        null,
-        2,
-      )}`,
+    if (!result.success) {
+      return {
+        toolName: toolName,
+        toolCallId: rawToolCall.toolCallId,
+        input: rawToolCall.input,
+        error: `Invalid parameters for ${toolName}: ${JSON.stringify(
+          result.error.issues,
+          null,
+          2,
+        )}`,
+      }
     }
   }
 
@@ -383,20 +339,22 @@ export async function executeCustomToolCall(
   const {
     toolName,
     input,
+    autoInsertEndStepParam = false,
+    excludeToolFromMessageHistory = false,
+    fromHandleSteps = false,
+
+    agentState,
+    agentTemplate,
+    fileContext,
+    logger,
+    onResponseChunk,
+    previousToolCallFinished,
+    requestToolCall,
+    toolCallId,
     toolCalls,
     toolResults,
     toolResultsToAddAfterStream,
-    previousToolCallFinished,
-    agentTemplate,
-    fileContext,
     userInputId,
-    onResponseChunk,
-    state,
-    autoInsertEndStepParam = false,
-    excludeToolFromMessageHistory = false,
-    requestToolCall,
-    logger,
-    fromHandleSteps = false,
   } = params
   const toolCall: CustomToolCall | ToolCallError = parseRawCustomToolCall({
     customToolDefs: await getMCPToolData({
@@ -407,24 +365,40 @@ export async function executeCustomToolCall(
     }),
     rawToolCall: {
       toolName,
-      toolCallId: generateCompactId(),
+      toolCallId: toolCallId ?? generateCompactId(),
       input,
     },
     autoInsertEndStepParam,
   })
+
+  // Filter out restricted tools - emit error instead of tool call/result
+  // This prevents the CLI from showing tool calls that the agent doesn't have permission to use
+  if (
+    toolCall.toolName &&
+    !(agentTemplate.toolNames as string[]).includes(toolCall.toolName) &&
+    !fromHandleSteps &&
+    !(
+      toolCall.toolName.includes('/') &&
+      toolCall.toolName.split('/')[0] in agentTemplate.mcpServers
+    )
+  ) {
+    // Emit an error event instead of tool call/result pair
+    // The stream parser will convert this to a user message for proper API compliance
+    onResponseChunk({
+      type: 'error',
+      message: `Tool \`${toolName}\` is not currently available. Make sure to only use tools listed in the system instructions.`,
+    })
+    return previousToolCallFinished
+  }
+
   if ('error' in toolCall) {
-    const toolResult: ToolResultPart = {
-      type: 'tool-result',
+    const toolResult: ToolMessage = {
+      role: 'tool',
       toolName,
       toolCallId: toolCall.toolCallId,
-      output: [
-        {
-          type: 'json',
-          value: {
-            errorMessage: toolCall.error,
-          },
-        },
-      ],
+      content: jsonToolResult({
+        errorMessage: toolCall.error,
+      }),
     }
     toolResults.push(cloneDeep(toolResult))
     toolResultsToAddAfterStream.push(cloneDeep(toolResult))
@@ -435,43 +409,19 @@ export async function executeCustomToolCall(
     return previousToolCallFinished
   }
 
+  // Only emit tool_call event after permission check passes
   onResponseChunk({
     type: 'tool_call',
     toolCallId: toolCall.toolCallId,
     toolName,
     input: toolCall.input,
     // Only include agentId for subagents (agents with a parent)
-    ...(state.agentState?.parentId && { agentId: state.agentState.agentId }),
+    ...(agentState?.parentId && { agentId: agentState.agentId }),
+    // Include includeToolCall flag if explicitly set to false
+    ...(excludeToolFromMessageHistory && { includeToolCall: false }),
   })
 
   toolCalls.push(toolCall)
-
-  // Filter out restricted tools in ask mode unless exporting summary
-  if (
-    !(agentTemplate.toolNames as string[]).includes(toolCall.toolName) &&
-    !fromHandleSteps &&
-    !(
-      toolCall.toolName.includes('/') &&
-      toolCall.toolName.split('/')[0] in agentTemplate.mcpServers
-    )
-  ) {
-    const toolResult: ToolResultPart = {
-      type: 'tool-result',
-      toolName,
-      toolCallId: toolCall.toolCallId,
-      output: [
-        {
-          type: 'json',
-          value: {
-            errorMessage: `Tool \`${toolName}\` is not currently available. Make sure to only use tools listed in the system instructions.`,
-          },
-        },
-      ],
-    }
-    toolResults.push(cloneDeep(toolResult))
-    toolResultsToAddAfterStream.push(cloneDeep(toolResult))
-    return previousToolCallFinished
-  }
 
   return previousToolCallFinished
     .then(async () => {
@@ -497,11 +447,11 @@ export async function executeCustomToolCall(
         return
       }
       const toolResult = {
-        type: 'tool-result',
+        role: 'tool',
         toolName,
         toolCallId: toolCall.toolCallId,
-        output: result,
-      } satisfies ToolResultPart
+        content: result,
+      } satisfies ToolMessage
       logger.debug(
         { input, toolResult },
         `${toolName} custom tool call & result (${toolResult.toolCallId})`,
@@ -514,17 +464,53 @@ export async function executeCustomToolCall(
         type: 'tool_result',
         toolName: toolResult.toolName,
         toolCallId: toolResult.toolCallId,
-        output: toolResult.output,
+        output: toolResult.content,
       })
 
       toolResults.push(toolResult)
 
-      if (!excludeToolFromMessageHistory) {
-        state.messages.push({
-          role: 'tool' as const,
-          content: toolResult,
-        } satisfies Message)
+      if (!excludeToolFromMessageHistory && !params.skipDirectResultPush) {
+        agentState.messageHistory.push(toolResult)
       }
       return
     })
+}
+
+/**
+ * Checks if a tool name matches a spawnable agent and returns the transformed
+ * spawn_agents input if so. Returns null if not an agent tool call.
+ */
+export function tryTransformAgentToolCall(params: {
+  toolName: string
+  input: Record<string, unknown>
+  spawnableAgents: AgentTemplateType[]
+}): { toolName: 'spawn_agents'; input: Record<string, unknown> } | null {
+  const { toolName, input, spawnableAgents } = params
+
+  const agentShortNames = spawnableAgents.map(getAgentShortName)
+  if (!agentShortNames.includes(toolName)) {
+    return null
+  }
+
+  // Find the full agent type for this short name
+  const fullAgentType = spawnableAgents.find(
+    (agentType) => getAgentShortName(agentType) === toolName,
+  )
+
+  // Convert to spawn_agents call - input already has prompt and params as top-level fields
+  // (consistent with spawn_agents schema)
+  const agentEntry: Record<string, unknown> = {
+    agent_type: fullAgentType || toolName,
+  }
+  if (typeof input.prompt === 'string') {
+    agentEntry.prompt = input.prompt
+  }
+  if (input.params && typeof input.params === 'object') {
+    agentEntry.params = input.params
+  }
+  const spawnAgentsInput = {
+    agents: [agentEntry],
+  }
+
+  return { toolName: 'spawn_agents', input: spawnAgentsInput }
 }

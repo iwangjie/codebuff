@@ -1,16 +1,52 @@
+import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
+import { AskUserBridge } from '@codebuff/common/utils/ask-user-bridge'
 import { CodebuffClient } from '@codebuff/sdk'
 
-import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
-import { findGitRoot } from './git'
 import { getAuthTokenDetails } from './auth'
-import { loadAgentDefinitions } from './load-agent-definitions'
+import { getCliEnv, getSystemProcessEnv } from './env'
+import { loadAgentDefinitions } from './local-agent-registry'
 import { logger } from './logger'
+import { getRgPath } from '../native/ripgrep'
+import { getProjectRoot } from '../project-files'
+
+import type { ClientToolCall } from '@codebuff/common/tools/list'
 
 let clientInstance: CodebuffClient | null = null
 
-export function getCodebuffClient(): CodebuffClient | null {
+/**
+ * Recursively removes undefined values from an object to ensure clean JSON serialization.
+ * This prevents issues with APIs that don't accept explicit undefined values.
+ */
+function removeUndefinedValues<T>(obj: T): T {
+  if (obj === null || obj === undefined) {
+    return obj
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(removeUndefinedValues) as T
+  }
+  if (typeof obj === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(obj)) {
+      if (value !== undefined) {
+        result[key] = removeUndefinedValues(value)
+      }
+    }
+    return result as T
+  }
+  return obj
+}
+
+/**
+ * Reset the cached CodebuffClient instance.
+ * This should be called after login to ensure the client is re-initialized with new credentials.
+ */
+export function resetCodebuffClient(): void {
+  clientInstance = null
+}
+
+export async function getCodebuffClient(): Promise<CodebuffClient | null> {
   if (!clientInstance) {
-    const { token: apiKey, source } = getAuthTokenDetails()
+    const { token: apiKey } = getAuthTokenDetails()
 
     if (!apiKey) {
       logger.warn(
@@ -20,13 +56,43 @@ export function getCodebuffClient(): CodebuffClient | null {
       return null
     }
 
-    const gitRoot = findGitRoot()
+    const projectRoot = getProjectRoot()
+
+    // Set up ripgrep path for SDK to use
+    const env = getCliEnv()
+    if (env.CODEBUFF_IS_BINARY) {
+      try {
+        const rgPath = await getRgPath()
+        // Note: We still set process.env here because SDK reads from it
+        getSystemProcessEnv().CODEBUFF_RG_PATH = rgPath
+      } catch (error) {
+        logger.error(error, 'Failed to set up ripgrep binary for SDK')
+      }
+    }
+
     try {
       const agentDefinitions = loadAgentDefinitions()
       clientInstance = new CodebuffClient({
         apiKey,
-        cwd: gitRoot,
+        cwd: projectRoot,
         agentDefinitions,
+        overrideTools: {
+          ask_user: async (input: ClientToolCall<'ask_user'>['input']) => {
+            const response = (await AskUserBridge.request(
+              'cli-override',
+              input.questions,
+            )) as {
+              answers?: Array<{ questionIndex: number; selectedOption: string }>
+              skipped?: boolean
+            }
+            return [
+              {
+                type: 'json',
+                value: removeUndefinedValues(response),
+              },
+            ]
+          },
+        },
       })
     } catch (error) {
       logger.error(error, 'Failed to initialize CodebuffClient')
@@ -119,6 +185,14 @@ export function formatToolOutput(output: unknown): string {
     return output
       .map((item) => {
         if (item.type === 'json') {
+          // Handle errorMessage in the value object
+          if (
+            item.value &&
+            typeof item.value === 'object' &&
+            'errorMessage' in item.value
+          ) {
+            return String(item.value.errorMessage)
+          }
           return toYaml(item.value)
         }
         if (item.type === 'text') {

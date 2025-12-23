@@ -2,6 +2,11 @@ import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import {
+  assistantMessage,
+  systemMessage,
+  userMessage,
+} from '@codebuff/common/util/messages'
+import {
   describe,
   expect,
   it,
@@ -17,12 +22,17 @@ import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
-import type { Message } from '@codebuff/common/types/messages/codebuff-message'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 
 describe('Spawn Agents Message History', () => {
   let mockSendSubagentChunk: any
   let mockLoopAgentSteps: any
   let capturedSubAgentState: any
+
+  let handleSpawnAgentsBaseParams: ParamsExcluding<
+    typeof handleSpawnAgents,
+    'agentState' | 'agentTemplate' | 'localAgentTemplates' | 'toolCall'
+  >
 
   beforeEach(() => {
     // Mock sendSubagentChunk
@@ -39,12 +49,30 @@ describe('Spawn Agents Message History', () => {
           ...options.agentState,
           messageHistory: [
             ...options.agentState.messageHistory,
-            { role: 'assistant', content: 'Mock agent response' },
+            assistantMessage('Mock agent response'),
           ],
         },
-        output: { type: 'lastMessage', value: 'Mock agent response' },
+        output: { type: 'lastMessage', value: [assistantMessage('Mock agent response')] },
       }
     })
+
+    handleSpawnAgentsBaseParams = {
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ancestorRunIds: [],
+      clientSessionId: 'test-session',
+      fingerprintId: 'test-fingerprint',
+      fileContext: mockFileContext,
+      repoId: undefined,
+      repoUrl: undefined,
+      previousToolCallFinished: Promise.resolve(),
+      sendSubagentChunk: mockSendSubagentChunk,
+      signal: new AbortController().signal,
+      system: 'Test system prompt',
+      tools: {},
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      writeToClient: () => {},
+    }
   })
 
   afterEach(() => {
@@ -94,40 +122,20 @@ describe('Spawn Agents Message History', () => {
     const toolCall = createSpawnToolCall('child-agent')
 
     // Create mock messages including system message
-    const mockMessages: Message[] = [
-      {
-        role: 'system',
-        content: 'This is the parent system prompt that should be excluded',
-      },
-      { role: 'user', content: 'Hello' },
-      { role: 'assistant', content: 'Hi there!' },
-      { role: 'user', content: 'How are you?' },
+    sessionState.mainAgentState.messageHistory = [
+      systemMessage('This is the parent system prompt that should be excluded'),
+      userMessage('Hello'),
+      assistantMessage('Hi there!'),
+      userMessage('How are you?'),
     ]
 
-    const { result } = handleSpawnAgents({
-      ...TEST_AGENT_RUNTIME_IMPL,
-      repoId: undefined,
-      repoUrl: undefined,
-      previousToolCallFinished: Promise.resolve(),
+    await handleSpawnAgents({
+      ...handleSpawnAgentsBaseParams,
+      agentState: sessionState.mainAgentState,
+      agentTemplate: parentAgent,
+      localAgentTemplates: { 'child-agent': childAgent },
       toolCall,
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
-      userInputId: 'test-input',
-      writeToClient: () => {},
-      getLatestState: () => ({ messages: mockMessages }),
-      state: {
-        fingerprintId: 'test-fingerprint',
-        userId: TEST_USER_ID,
-        agentTemplate: parentAgent,
-        localAgentTemplates: { 'child-agent': childAgent },
-        sendSubagentChunk: mockSendSubagentChunk,
-        messages: mockMessages,
-        agentState: sessionState.mainAgentState,
-        system: 'Test system prompt',
-      },
     })
-
-    await result
 
     // Verify that the spawned agent was called
     expect(mockLoopAgentSteps).toHaveBeenCalledTimes(1)
@@ -135,33 +143,45 @@ describe('Spawn Agents Message History', () => {
     // Verify that the subagent's message history contains the filtered messages
     // expireMessages filters based on timeToLive property, not role
     // Since the system message doesn't have timeToLive, it will be included
-    expect(capturedSubAgentState.messageHistory).toHaveLength(4) // System + user + assistant messages
+    // System + user + assistant messages + spawn message
+    expect(capturedSubAgentState.messageHistory).toHaveLength(5)
 
     // Verify system message is included (because it has no timeToLive property)
     const systemMessages = capturedSubAgentState.messageHistory.filter(
       (msg: any) => msg.role === 'system',
     )
     expect(systemMessages).toHaveLength(1)
-    expect(systemMessages[0].content).toBe(
-      'This is the parent system prompt that should be excluded',
-    )
+    expect(systemMessages[0].content).toEqual([
+      {
+        type: 'text',
+        text: 'This is the parent system prompt that should be excluded',
+      },
+    ])
 
     // Verify user and assistant messages are included
     expect(
       capturedSubAgentState.messageHistory.find(
-        (msg: any) => msg.content === 'Hello',
+        (msg: any) => msg.content[0]?.text === 'Hello',
       ),
     ).toBeTruthy()
     expect(
       capturedSubAgentState.messageHistory.find(
-        (msg: any) => msg.content === 'Hi there!',
+        (msg: any) => msg.content[0]?.text === 'Hi there!',
       ),
     ).toBeTruthy()
     expect(
       capturedSubAgentState.messageHistory.find(
-        (msg: any) => msg.content === 'How are you?',
+        (msg: any) => msg.content[0]?.text === 'How are you?',
       ),
     ).toBeTruthy()
+
+    // Verify the subagent spawn message is included with proper structure
+    const spawnMessage = capturedSubAgentState.messageHistory.find(
+      (msg: any) => msg.tags?.includes('SUBAGENT_SPAWN'),
+    )
+    expect(spawnMessage).toBeTruthy()
+    expect(spawnMessage.role).toBe('user')
+    expect(spawnMessage.content[0]?.text).toContain('Subagent child-agent has been spawned')
   })
 
   it('should not include conversation history when includeMessageHistory is false', async () => {
@@ -170,36 +190,19 @@ describe('Spawn Agents Message History', () => {
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
-    const mockMessages: Message[] = [
-      { role: 'system', content: 'System prompt' },
-      { role: 'user', content: 'Hello' },
-      { role: 'assistant', content: 'Hi there!' },
+    sessionState.mainAgentState.messageHistory = [
+      systemMessage('System prompt'),
+      userMessage('Hello'),
+      assistantMessage('Hi there!'),
     ]
 
-    const { result } = handleSpawnAgents({
-      ...TEST_AGENT_RUNTIME_IMPL,
-      repoId: undefined,
-      repoUrl: undefined,
-      previousToolCallFinished: Promise.resolve(),
+    await handleSpawnAgents({
+      ...handleSpawnAgentsBaseParams,
+      agentState: sessionState.mainAgentState,
+      agentTemplate: parentAgent,
+      localAgentTemplates: { 'child-agent': childAgent },
       toolCall,
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
-      userInputId: 'test-input',
-      writeToClient: () => {},
-      getLatestState: () => ({ messages: mockMessages }),
-      state: {
-        fingerprintId: 'test-fingerprint',
-        userId: TEST_USER_ID,
-        agentTemplate: parentAgent,
-        localAgentTemplates: { 'child-agent': childAgent },
-        sendSubagentChunk: mockSendSubagentChunk,
-        messages: mockMessages,
-        agentState: sessionState.mainAgentState,
-        system: 'Test system prompt',
-      },
     })
-
-    await result
 
     // Verify that the subagent's message history is empty when includeMessageHistory is false
     expect(capturedSubAgentState.messageHistory).toHaveLength(0)
@@ -211,35 +214,25 @@ describe('Spawn Agents Message History', () => {
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
-    const mockMessages: Message[] = [] // Empty message history
+    sessionState.mainAgentState.messageHistory = [] // Empty message history
 
-    const { result } = handleSpawnAgents({
-      ...TEST_AGENT_RUNTIME_IMPL,
-      repoId: undefined,
-      repoUrl: undefined,
-      previousToolCallFinished: Promise.resolve(),
+    await handleSpawnAgents({
+      ...handleSpawnAgentsBaseParams,
+      agentState: sessionState.mainAgentState,
+      agentTemplate: parentAgent,
+      localAgentTemplates: { 'child-agent': childAgent },
       toolCall,
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
-      userInputId: 'test-input',
-      writeToClient: () => {},
-      getLatestState: () => ({ messages: mockMessages }),
-      state: {
-        fingerprintId: 'test-fingerprint',
-        userId: TEST_USER_ID,
-        agentTemplate: parentAgent,
-        localAgentTemplates: { 'child-agent': childAgent },
-        sendSubagentChunk: mockSendSubagentChunk,
-        messages: mockMessages,
-        agentState: sessionState.mainAgentState,
-        system: 'Test system prompt',
-      },
     })
 
-    await result
+    // Verify that the subagent's message history contains only the spawn message
+    // when includeMessageHistory is true (even with empty parent history)
+    expect(capturedSubAgentState.messageHistory).toHaveLength(1)
 
-    // Verify that the subagent's message history is empty when there are no messages to pass
-    expect(capturedSubAgentState.messageHistory).toHaveLength(0)
+    // Verify the spawn message structure
+    const spawnMessage = capturedSubAgentState.messageHistory[0]
+    expect(spawnMessage.role).toBe('user')
+    expect(spawnMessage.tags).toContain('SUBAGENT_SPAWN')
+    expect(spawnMessage.content[0]?.text).toContain('Subagent child-agent has been spawned')
   })
 
   it('should handle message history with only system messages', async () => {
@@ -248,42 +241,32 @@ describe('Spawn Agents Message History', () => {
     const sessionState = getInitialSessionState(mockFileContext)
     const toolCall = createSpawnToolCall('child-agent')
 
-    const mockMessages: Message[] = [
-      { role: 'system', content: 'System prompt 1' },
-      { role: 'system', content: 'System prompt 2' },
+    sessionState.mainAgentState.messageHistory = [
+      systemMessage('System prompt 1'),
+      systemMessage('System prompt 2'),
     ]
 
-    const { result } = handleSpawnAgents({
-      ...TEST_AGENT_RUNTIME_IMPL,
-      repoId: undefined,
-      repoUrl: undefined,
-      previousToolCallFinished: Promise.resolve(),
+    await handleSpawnAgents({
+      ...handleSpawnAgentsBaseParams,
+      agentState: sessionState.mainAgentState,
+      agentTemplate: parentAgent,
+      localAgentTemplates: { 'child-agent': childAgent },
       toolCall,
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
-      userInputId: 'test-input',
-      writeToClient: () => {},
-      getLatestState: () => ({ messages: mockMessages }),
-      state: {
-        fingerprintId: 'test-fingerprint',
-        userId: TEST_USER_ID,
-        agentTemplate: parentAgent,
-        localAgentTemplates: { 'child-agent': childAgent },
-        sendSubagentChunk: mockSendSubagentChunk,
-        messages: mockMessages,
-        agentState: sessionState.mainAgentState,
-        system: 'Test system prompt',
-      },
     })
-
-    await result
 
     // Verify that system messages without timeToLive are included
     // expireMessages only filters messages with timeToLive='userPrompt'
-    expect(capturedSubAgentState.messageHistory).toHaveLength(2)
+    // Plus 1 for the subagent spawn message
+    expect(capturedSubAgentState.messageHistory).toHaveLength(3)
     const systemMessages = capturedSubAgentState.messageHistory.filter(
       (msg: any) => msg.role === 'system',
     )
     expect(systemMessages).toHaveLength(2)
+
+    // Verify spawn message is present
+    const spawnMessage = capturedSubAgentState.messageHistory.find(
+      (msg: any) => msg.tags?.includes('SUBAGENT_SPAWN'),
+    )
+    expect(spawnMessage).toBeTruthy()
   })
 })

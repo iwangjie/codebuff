@@ -31,6 +31,7 @@ export const printModeToolCallSchema = z.object({
   input: z.record(z.string(), z.any()),
   agentId: z.string().optional(),
   parentAgentId: z.string().optional(),
+  includeToolCall: z.boolean().optional(),
 })
 export type PrintModeToolCall = z.infer<typeof printModeToolCallSchema>
 
@@ -64,6 +65,8 @@ export const printModeSubagentStartSchema = z.object({
   displayName: z.string(),
   onlyChild: z.boolean(),
   parentAgentId: z.string().optional(),
+  params: z.record(z.string(), z.any()).optional(),
+  prompt: z.string().optional(),
 })
 export type PrintModeSubagentStart = z.infer<
   typeof printModeSubagentStartSchema
@@ -76,9 +79,21 @@ export const printModeSubagentFinishSchema = z.object({
   displayName: z.string(),
   onlyChild: z.boolean(),
   parentAgentId: z.string().optional(),
+  params: z.record(z.string(), z.any()).optional(),
+  prompt: z.string().optional(),
 })
 export type PrintModeSubagentFinish = z.infer<
   typeof printModeSubagentFinishSchema
+>
+
+export const printModeReasoningDeltaSchema = z.object({
+  type: z.literal('reasoning_delta'),
+  text: z.string(),
+  ancestorRunIds: z.string().array(),
+  runId: z.string(),
+})
+export type PrintModeReasoningDelta = z.infer<
+  typeof printModeReasoningDeltaSchema
 >
 
 export const printModeEventSchema = z.discriminatedUnion('type', [
@@ -91,6 +106,8 @@ export const printModeEventSchema = z.discriminatedUnion('type', [
   printModeTextSchema,
   printModeToolCallSchema,
   printModeToolResultSchema,
+
+  printModeReasoningDeltaSchema,
 ])
 
 export type PrintModeEvent = z.infer<typeof printModeEventSchema>

@@ -1,32 +1,46 @@
 import path from 'path'
 
 import {
-  OpenAICompatibleChatLanguageModel,
-  VERSION,
-} from '@ai-sdk/openai-compatible'
-import {
   checkLiveUserInput,
   getLiveUserInputIds,
 } from '@codebuff/agent-runtime/live-user-inputs'
-import { PROFIT_MARGIN } from '@codebuff/common/old-constants'
+import { getByokOpenrouterApiKeyFromEnv } from '../env'
+import {
+  BYOK_OPENROUTER_HEADER,
+} from '@codebuff/common/constants/byok'
+import { models, PROFIT_MARGIN } from '@codebuff/common/old-constants'
 import { buildArray } from '@codebuff/common/util/array'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { convertCbToModelMessages } from '@codebuff/common/util/messages'
+import { isExplicitlyDefinedModel } from '@codebuff/common/util/model-utils'
 import { StopSequenceHandler } from '@codebuff/common/util/stop-sequence'
-import { streamText, APICallError, generateText, generateObject } from 'ai'
+import {
+  OpenAICompatibleChatLanguageModel,
+  VERSION,
+} from '@codebuff/internal/openai-compatible/index'
+import {
+  streamText,
+  generateText,
+  generateObject,
+  NoSuchToolError,
+  APICallError,
+  ToolCallRepairError,
+  InvalidToolInputError,
+  TypeValidationError,
+} from 'ai'
 
 import { WEBSITE_URL } from '../constants'
-
 import type { LanguageModelV2 } from '@ai-sdk/provider'
+import type { OpenRouterProviderRoutingOptions } from '@codebuff/common/types/agent-template'
 import type {
   PromptAiSdkFn,
   PromptAiSdkStreamFn,
   PromptAiSdkStructuredInput,
   PromptAiSdkStructuredOutput,
 } from '@codebuff/common/types/contracts/llm'
-import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ParamsOf } from '@codebuff/common/types/function-params'
-import type { OpenRouterProviderOptions } from '@openrouter/ai-sdk-provider'
+import type { JSONObject } from '@codebuff/common/types/json'
+import type { OpenRouterProviderOptions } from '@codebuff/internal/openrouter-ai-sdk'
 import type z from 'zod/v4'
 
 // Forked from https://github.com/OpenRouterTeam/ai-sdk-provider/
@@ -37,18 +51,81 @@ type OpenRouterUsageAccounting = {
   }
 }
 
+// Provider routing documentation: https://openrouter.ai/docs/features/provider-routing
+const providerOrder = {
+  [models.openrouter_claude_sonnet_4]: [
+    'Google',
+    'Anthropic',
+    'Amazon Bedrock',
+  ],
+  [models.openrouter_claude_sonnet_4_5]: [
+    'Google',
+    'Anthropic',
+    'Amazon Bedrock',
+  ],
+  [models.openrouter_claude_opus_4]: ['Google', 'Anthropic'],
+}
+
 function calculateUsedCredits(params: { costDollars: number }): number {
   const { costDollars } = params
 
   return Math.round(costDollars * (1 + PROFIT_MARGIN) * 100)
 }
 
+function getProviderOptions(params: {
+  model: string
+  runId: string
+  clientSessionId: string
+  providerOptions?: Record<string, JSONObject>
+  agentProviderOptions?: OpenRouterProviderRoutingOptions
+  n?: number
+}): { codebuff: JSONObject } {
+  const {
+    model,
+    runId,
+    clientSessionId,
+    providerOptions,
+    agentProviderOptions,
+    n,
+  } = params
+
+  let providerConfig: Record<string, any>
+
+  // Use agent's provider options if provided, otherwise use defaults
+  if (agentProviderOptions) {
+    providerConfig = agentProviderOptions
+  } else {
+    // Set allow_fallbacks based on whether model is explicitly defined
+    const isExplicitlyDefined = isExplicitlyDefinedModel(model)
+
+    providerConfig = {
+      order: providerOrder[model as keyof typeof providerOrder],
+      allow_fallbacks: !isExplicitlyDefined,
+    }
+  }
+
+  return {
+    ...providerOptions,
+    // Could either be "codebuff" or "openaiCompatible"
+    codebuff: {
+      ...providerOptions?.codebuff,
+      // All values here get appended to the request body
+      codebuff_metadata: {
+        run_id: runId,
+        client_id: clientSessionId,
+        ...(n && { n }),
+      },
+      transforms: ['middle-out'],
+      provider: providerConfig,
+    },
+  }
+}
+
 function getAiSdkModel(params: {
   apiKey: string
   model: string
-  logger: Logger
 }): LanguageModelV2 {
-  const { apiKey, model, logger } = params
+  const { apiKey, model } = params
 
   const openrouterUsage: OpenRouterUsageAccounting = {
     cost: null,
@@ -57,16 +134,22 @@ function getAiSdkModel(params: {
     },
   }
 
+  const openrouterApiKey = getByokOpenrouterApiKeyFromEnv()
   const codebuffBackendModel = new OpenAICompatibleChatLanguageModel(model, {
-    provider: 'codebuff.chat',
+    provider: 'codebuff',
     url: ({ path: endpoint }) =>
       new URL(path.join('/api/v1', endpoint), WEBSITE_URL).toString(),
     headers: () => ({
       Authorization: `Bearer ${apiKey}`,
       'user-agent': `ai-sdk/openai-compatible/${VERSION}/codebuff`,
+      ...(openrouterApiKey && { [BYOK_OPENROUTER_HEADER]: openrouterApiKey }),
     }),
     metadataExtractor: {
       extractMetadata: async ({ parsedBody }: { parsedBody: any }) => {
+        if (openrouterApiKey !== undefined) {
+          return { codebuff: { usage: openrouterUsage } }
+        }
+
         if (typeof parsedBody?.usage?.cost === 'number') {
           openrouterUsage.cost = parsedBody.usage.cost
         }
@@ -74,13 +157,17 @@ function getAiSdkModel(params: {
           typeof parsedBody?.usage?.cost_details?.upstream_inference_cost ===
           'number'
         ) {
-          openrouterUsage.cost =
+          openrouterUsage.costDetails.upstreamInferenceCost =
             parsedBody.usage.cost_details.upstream_inference_cost
         }
         return { codebuff: { usage: openrouterUsage } }
       },
       createStreamExtractor: () => ({
         processChunk: (parsedChunk: any) => {
+          if (openrouterApiKey !== undefined) {
+            return
+          }
+
           if (typeof parsedChunk?.usage?.cost === 'number') {
             openrouterUsage.cost = parsedChunk.usage.cost
           }
@@ -132,21 +219,128 @@ export async function* promptAiSdkStream(
     prompt: undefined,
     model: aiSDKModel,
     messages: convertCbToModelMessages(params),
-    providerOptions: {
-      codebuff: {
-        codebuff_metadata: {
-          run_id: params.runId,
-          client_id: params.clientSessionId,
+    providerOptions: getProviderOptions({
+      ...params,
+      agentProviderOptions: params.agentProviderOptions,
+    }),
+    // Handle tool call errors gracefully by passing them through to our validation layer
+    // instead of throwing (which would halt the agent). The only special case is when
+    // the tool name matches a spawnable agent - transform those to spawn_agents calls.
+    experimental_repairToolCall: async ({ toolCall, tools, error }) => {
+      const { spawnableAgents = [], localAgentTemplates = {} } = params
+      const toolName = toolCall.toolName
+
+      // Check if this is a NoSuchToolError for a spawnable agent
+      // If so, transform to spawn_agents call
+      if (NoSuchToolError.isInstance(error) && 'spawn_agents' in tools) {
+        // Also check for underscore variant (e.g., "file_picker" -> "file-picker")
+        const toolNameWithHyphens = toolName.replace(/_/g, '-')
+
+        const matchingAgentId = spawnableAgents.find((agentId) => {
+          const withoutVersion = agentId.split('@')[0]
+          const parts = withoutVersion.split('/')
+          const agentName = parts[parts.length - 1]
+          return (
+            agentName === toolName ||
+            agentName === toolNameWithHyphens ||
+            agentId === toolName
+          )
+        })
+        const isSpawnableAgent = matchingAgentId !== undefined
+        const isLocalAgent =
+          toolName in localAgentTemplates ||
+          toolNameWithHyphens in localAgentTemplates
+
+        if (isSpawnableAgent || isLocalAgent) {
+          // Transform agent tool call to spawn_agents
+          const deepParseJson = (value: unknown): unknown => {
+            if (typeof value === 'string') {
+              try {
+                return deepParseJson(JSON.parse(value))
+              } catch {
+                return value
+              }
+            }
+            if (Array.isArray(value)) return value.map(deepParseJson)
+            if (value !== null && typeof value === 'object') {
+              return Object.fromEntries(
+                Object.entries(value).map(([k, v]) => [k, deepParseJson(v)]),
+              )
+            }
+            return value
+          }
+
+          let input: Record<string, unknown> = {}
+          try {
+            const rawInput =
+              typeof toolCall.input === 'string'
+                ? JSON.parse(toolCall.input)
+                : (toolCall.input as Record<string, unknown>)
+            input = deepParseJson(rawInput) as Record<string, unknown>
+          } catch {
+            // If parsing fails, use empty object
+          }
+
+          const prompt =
+            typeof input.prompt === 'string' ? input.prompt : undefined
+          const agentParams = Object.fromEntries(
+            Object.entries(input).filter(
+              ([key, value]) =>
+                !(key === 'prompt' && typeof value === 'string'),
+            ),
+          )
+
+          // Use the matching agent ID or corrected name with hyphens
+          const correctedAgentType =
+            matchingAgentId ??
+            (toolNameWithHyphens in localAgentTemplates
+              ? toolNameWithHyphens
+              : toolName)
+
+          const spawnAgentsInput = {
+            agents: [
+              {
+                agent_type: correctedAgentType,
+                ...(prompt !== undefined && { prompt }),
+                ...(Object.keys(agentParams).length > 0 && {
+                  params: agentParams,
+                }),
+              },
+            ],
+          }
+
+          logger.info(
+            { originalToolName: toolName, transformedInput: spawnAgentsInput },
+            'Transformed agent tool call to spawn_agents',
+          )
+
+          return {
+            ...toolCall,
+            toolName: 'spawn_agents',
+            input: JSON.stringify(spawnAgentsInput),
+          }
+        }
+      }
+
+      // For all other cases (invalid args, unknown tools, etc.), pass through
+      // the original tool call.
+      logger.info(
+        {
+          toolName,
+          errorType: error.name,
+          error: error.message,
         },
-      },
+        'Tool error - passing through for graceful error handling',
+      )
+      return toolCall
     },
   })
 
   let content = ''
   const stopSequenceHandler = new StopSequenceHandler(params.stopSequences)
 
-  for await (const chunk of response.fullStream) {
-    if (chunk.type !== 'text-delta') {
+  for await (const chunkValue of response.fullStream) {
+    if (chunkValue.type !== 'text-delta') {
       const flushed = stopSequenceHandler.flush()
       if (flushed) {
         content += flushed
@@ -157,34 +351,57 @@ export async function* promptAiSdkStream(
         }
       }
     }
-    if (chunk.type === 'error') {
-      logger.error(
-        {
-          chunk: { ...chunk, error: undefined },
-          error: getErrorObject(chunk.error),
-          model: params.model,
-        },
-        'Error from AI SDK',
-      )
+    if (chunkValue.type === 'error') {
+      // Error chunks from fullStream are non-network errors (tool failures, model issues, etc.)
+      // Network errors are thrown, not yielded as chunks.
 
-      const errorBody = APICallError.isInstance(chunk.error)
-        ? chunk.error.responseBody
+      const errorBody = APICallError.isInstance(chunkValue.error)
+        ? chunkValue.error.responseBody
         : undefined
       const mainErrorMessage =
-        chunk.error instanceof Error
-          ? chunk.error.message
-          : typeof chunk.error === 'string'
-            ? chunk.error
-            : JSON.stringify(chunk.error)
-      const errorMessage = `Error from AI SDK (model ${params.model}): ${buildArray([mainErrorMessage, errorBody]).join('\n')}`
-      yield {
-        type: 'error',
-        message: errorMessage,
+        chunkValue.error instanceof Error
+          ? chunkValue.error.message
+          : typeof chunkValue.error === 'string'
+            ? chunkValue.error
+            : JSON.stringify(chunkValue.error)
+      const errorMessage = buildArray([mainErrorMessage, errorBody]).join('\n')
+
+      // Pass these errors back to the agent so it can see what went wrong and retry.
+      // Note: If you find any other error types that should be passed through to the agent, add them here!
+      if (
+        NoSuchToolError.isInstance(chunkValue.error) ||
+        InvalidToolInputError.isInstance(chunkValue.error) ||
+        ToolCallRepairError.isInstance(chunkValue.error) ||
+        TypeValidationError.isInstance(chunkValue.error)
+      ) {
+        logger.warn(
+          {
+            chunk: { ...chunkValue, error: undefined },
+            error: getErrorObject(chunkValue.error),
+            model: params.model,
+          },
+          'Tool call error in AI SDK stream - passing through to agent to retry',
+        )
+        yield {
+          type: 'error',
+          message: errorMessage,
+        }
+        continue
       }
 
-      return null
+      logger.error(
+        {
+          chunk: { ...chunkValue, error: undefined },
+          error: getErrorObject(chunkValue.error),
+          model: params.model,
+        },
+        'Error in AI SDK stream',
+      )
+
+      // For all other errors, throw them -- they are fatal.
+      throw chunkValue.error
     }
-    if (chunk.type === 'reasoning-delta') {
+    if (chunkValue.type === 'reasoning-delta') {
       for (const provider of ['openrouter', 'codebuff'] as const) {
         if (
           (
@@ -198,23 +415,23 @@ export async function* promptAiSdkStream(
       }
       yield {
         type: 'reasoning',
-        text: chunk.text,
+        text: chunkValue.text,
       }
     }
-    if (chunk.type === 'text-delta') {
+    if (chunkValue.type === 'text-delta') {
       if (!params.stopSequences) {
-        content += chunk.text
-        if (chunk.text) {
+        content += chunkValue.text
+        if (chunkValue.text) {
           yield {
             type: 'text',
-            text: chunk.text,
+            text: chunkValue.text,
             ...(agentChunkMetadata ?? {}),
           }
         }
         continue
       }
 
-      const stopSequenceResult = stopSequenceHandler.process(chunk.text)
+      const stopSequenceResult = stopSequenceHandler.process(chunkValue.text)
       if (stopSequenceResult.text) {
         content += stopSequenceResult.text
         yield {
@@ -223,6 +440,9 @@ export async function* promptAiSdkStream(
           ...(agentChunkMetadata ?? {}),
         }
       }
+    }
+    if (chunkValue.type === 'tool-call') {
+      yield chunkValue
     }
   }
   const flushed = stopSequenceHandler.flush()
@@ -285,14 +505,10 @@ export async function promptAiSdk(
     prompt: undefined,
     model: aiSDKModel,
     messages: convertCbToModelMessages(params),
-    providerOptions: {
-      codebuff: {
-        codebuff_metadata: {
-          run_id: params.runId,
-          client_id: params.clientSessionId,
-        },
-      },
-    },
+    providerOptions: getProviderOptions({
+      ...params,
+      agentProviderOptions: params.agentProviderOptions,
+    }),
   })
   const content = response.text
 
@@ -343,14 +559,10 @@ export async function promptAiSdkStructured<T>(
     model: aiSDKModel,
     output: 'object',
     messages: convertCbToModelMessages(params),
-    providerOptions: {
-      codebuff: {
-        codebuff_metadata: {
-          run_id: params.runId,
-          client_id: params.clientSessionId,
-        },
-      },
-    },
+    providerOptions: getProviderOptions({
+      ...params,
+      agentProviderOptions: params.agentProviderOptions,
+    }),
   })
 
   const content = response.object

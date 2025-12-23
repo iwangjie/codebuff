@@ -2,10 +2,12 @@ import { spawn } from 'child_process'
 import * as os from 'os'
 import * as path from 'path'
 
+import { getSystemProcessEnv } from '../env'
 import {
   stripColors,
   truncateStringWithMessage,
 } from '../../../common/src/util/string'
+
 import type { CodebuffToolOutput } from '../../../common/src/tools/list'
 
 const COMMAND_OUTPUT_LIMIT = 50_000
@@ -21,7 +23,7 @@ export function runTerminalCommand({
   process_type: 'SYNC' | 'BACKGROUND'
   cwd: string
   timeout_seconds: number
-  env?: Record<string, string>
+  env?: NodeJS.ProcessEnv
 }): Promise<CodebuffToolOutput<'run_terminal_command'>> {
   if (process_type === 'BACKGROUND') {
     throw new Error('BACKGROUND process_type not implemented')
@@ -38,9 +40,9 @@ export function runTerminalCommand({
     const childProcess = spawn(shell, [...shellArgs, command], {
       cwd: resolvedCwd,
       env: {
-        ...process.env,
+        ...getSystemProcessEnv(),
         ...(env ?? {}),
-      },
+      } as NodeJS.ProcessEnv,
       stdio: 'pipe',
     })
 

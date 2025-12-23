@@ -1,4 +1,4 @@
-import { parseToolCallXml } from '@codebuff/internal'
+import { parseToolCallXml } from '@codebuff/common/util/xml-parser'
 
 import type { TraceMessage } from '@/app/api/admin/traces/[clientRequestId]/messages/route'
 import type { TimelineEvent } from '@/app/api/admin/traces/[clientRequestId]/timeline/route'
@@ -446,7 +446,7 @@ export function extractActualAssistantResponse(response: any): string {
   if (!response) return ''
 
   // Extract the raw response content first
-  let responseContent = extractAssistantResponseFromResponse(response)
+  const responseContent = extractAssistantResponseFromResponse(response)
 
   if (!responseContent) return ''
 

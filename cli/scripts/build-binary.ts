@@ -11,9 +11,9 @@ import {
   rmSync,
   writeFileSync,
 } from 'fs'
+import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { tmpdir } from 'os'
 
 type TargetInfo = {
   bunTarget: string
@@ -126,6 +126,10 @@ async function main() {
   if (!existsSync(binDir)) {
     mkdirSync(binDir, { recursive: true })
   }
+
+  // Generate bundled agents file before compiling
+  log('Generating bundled agents...')
+  runCommand('bun', ['run', 'scripts/prebuild-agents.ts'], { cwd: cliRoot, env: process.env })
 
   // Ensure SDK assets exist before compiling the CLI
   log('Building SDK dependencies...')

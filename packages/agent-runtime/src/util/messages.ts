@@ -2,6 +2,7 @@ import { AssertionError } from 'assert'
 
 import { buildArray } from '@codebuff/common/util/array'
 import { getErrorObject } from '@codebuff/common/util/error'
+import { systemMessage, userMessage } from '@codebuff/common/util/messages'
 import { closeXml } from '@codebuff/common/util/xml'
 import { cloneDeep, isEqual } from 'lodash'
 
@@ -14,10 +15,7 @@ import type {
   CodebuffToolOutput,
 } from '@codebuff/common/tools/list'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
-import type {
-  Message,
-  ToolMessage,
-} from '@codebuff/common/types/messages/codebuff-message'
+import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type {
   TextPart,
   ImagePart,
@@ -28,16 +26,7 @@ export function messagesWithSystem(params: {
   system: System
 }): Message[] {
   const { messages, system } = params
-  return [
-    {
-      role: 'system',
-      content:
-        typeof system === 'string'
-          ? system
-          : system.map((part) => part.text).join('\n\n'),
-    },
-    ...messages,
-  ]
+  return [systemMessage(system), ...messages]
 }
 
 export function asUserMessage(str: string): string {
@@ -45,27 +34,86 @@ export function asUserMessage(str: string): string {
 }
 
 /**
- * Combines prompt, params, and content into a unified message content structure
+ * Combines prompt, params, and content into a unified message content structure.
+ * Always wraps the first text part in <user_message> tags for consistent XML framing.
+ * If you need a specific text part wrapped, put it first or pre-wrap it yourself before calling.
  */
 export function buildUserMessageContent(
   prompt: string | undefined,
   params: Record<string, any> | undefined,
   content?: Array<TextPart | ImagePart>,
-): string | Array<TextPart | ImagePart> {
-  // If we have content, return it as-is (client should have already combined prompt + content)
+): Array<TextPart | ImagePart> {
+  const promptHasNonWhitespaceText = (prompt ?? '').trim().length > 0
+
+  // If we have content array (e.g., text + images)
   if (content && content.length > 0) {
-    if (content.length === 1 && content[0].type === 'text') {
-      return asUserMessage(content[0].text)
+    // Check if content has a non-empty text part
+    const firstTextPart = content.find((p): p is TextPart => p.type === 'text')
+    const hasNonEmptyText = firstTextPart && firstTextPart.text.trim()
+
+    // If content has no meaningful text but prompt is provided, prepend prompt
+    if (!hasNonEmptyText && promptHasNonWhitespaceText) {
+      const nonTextContent = content.filter((p) => p.type !== 'text')
+      return [
+        { type: 'text' as const, text: asUserMessage(prompt!) },
+        ...nonTextContent,
+      ]
     }
-    return content
+
+    // Find the first text part and wrap it in <user_message> tags
+    let hasWrappedText = false
+    const wrappedContent = content.map((part) => {
+      if (part.type === 'text' && !hasWrappedText) {
+        hasWrappedText = true
+        // Check if already wrapped
+        const alreadyWrapped = parseUserMessage(part.text) !== undefined
+        if (alreadyWrapped) {
+          return part
+        }
+        return {
+          type: 'text' as const,
+          text: asUserMessage(part.text),
+        }
+      }
+      return part
+    })
+    return wrappedContent
   }
 
   // Only prompt/params, combine and return as simple text
   const textParts = buildArray([
-    prompt,
+    promptHasNonWhitespaceText ? prompt : undefined,
     params && JSON.stringify(params, null, 2),
   ])
-  return asUserMessage(textParts.join('\n\n'))
+  return [
+    {
+      type: 'text',
+      text: asUserMessage(textParts.join('\n\n')),
+    },
+  ]
+}
+
+export function getCancelledAdditionalMessages(args: {
+  prompt: string | undefined
+  params: Record<string, any> | undefined
+  content?: Array<TextPart | ImagePart>
+  pendingAgentResponse: string
+  systemMessage: string
+}): Message[] {
+  const { prompt, params, content, pendingAgentResponse, systemMessage } = args
+
+  const messages: Message[] = [
+    {
+      role: 'user',
+      content: buildUserMessageContent(prompt, params, content),
+      tags: ['USER_PROMPT'],
+    },
+    userMessage(
+      `<previous_assistant_message>${pendingAgentResponse}</previous_assistant_message>\n\n${withSystemTags(systemMessage)}`,
+    ),
+  ]
+
+  return messages
 }
 
 export function parseUserMessage(str: string): string | undefined {
@@ -73,23 +121,12 @@ export function parseUserMessage(str: string): string | undefined {
   return match ? match[1] : undefined
 }
 
-export function asSystemInstruction(str: string): string {
+export function withSystemInstructionTags(str: string): string {
   return `<system_instructions>${str}${closeXml('system_instructions')}`
 }
 
-export function asSystemMessage(str: string): string {
+export function withSystemTags(str: string): string {
   return `<system>${str}${closeXml('system')}`
-}
-
-export function isSystemInstruction(str: string): boolean {
-  return (
-    str.startsWith('<system_instructions>') &&
-    str.endsWith(closeXml('system_instructions'))
-  )
-}
-
-export function isSystemMessage(str: string): boolean {
-  return str.startsWith('<system>') && str.endsWith(closeXml('system'))
 }
 
 export function castAssistantMessage(message: Message): Message | null {
@@ -97,10 +134,9 @@ export function castAssistantMessage(message: Message): Message | null {
     return message
   }
   if (typeof message.content === 'string') {
-    return {
-      content: `<previous_assistant_message>${message.content}${closeXml('previous_assistant_message')}`,
-      role: 'user' as const,
-    }
+    return userMessage(
+      `<previous_assistant_message>${message.content}${closeXml('previous_assistant_message')}`,
+    )
   }
   const content = buildArray(
     message.content.map((m) => {
@@ -148,10 +184,9 @@ function simplifyTerminalHelper(params: {
 
 // Factor to reduce token count target by, to leave room for new messages
 const shortenedMessageTokenFactor = 0.5
-const replacementMessage = {
-  role: 'user',
-  content: asSystemMessage('Previous message(s) omitted due to length'),
-} satisfies Message
+const replacementMessage = userMessage(
+  withSystemTags('Previous message(s) omitted due to length'),
+)
 
 /**
  * Trims messages from the beginning to fit within token limits while preserving
@@ -192,7 +227,7 @@ export function trimMessagesToFitTokenLimit(params: {
     if (m.role === 'system' || m.role === 'user' || m.role === 'assistant') {
       shortenedMessages.push(m)
     } else if (m.role === 'tool') {
-      if (m.content.toolName !== 'run_terminal_command') {
+      if (m.toolName !== 'run_terminal_command') {
         shortenedMessages.push(m)
         continue
       }
@@ -202,11 +237,11 @@ export function trimMessagesToFitTokenLimit(params: {
       ) as CodebuffToolMessage<'run_terminal_command'>
 
       const result = simplifyTerminalHelper({
-        toolResult: terminalResultMessage.content.output,
+        toolResult: terminalResultMessage.content,
         numKept,
         logger,
       })
-      terminalResultMessage.content.output = result.result
+      terminalResultMessage.content = result.result
       numKept = result.numKept
 
       shortenedMessages.push(terminalResultMessage)
@@ -298,6 +333,53 @@ export function expireMessages(
   })
 }
 
+/**
+ * Removes tool calls from the message history that don't have corresponding tool responses.
+ * This is important when passing message history to spawned agents, as unfinished tool calls
+ * will cause issues with the LLM expecting tool responses.
+ *
+ * The function:
+ * 1. Collects all toolCallIds from tool response messages
+ * 2. Filters assistant messages to remove tool-call content parts without responses
+ * 3. Removes assistant messages that become empty after filtering
+ */
+export function filterUnfinishedToolCalls(messages: Message[]): Message[] {
+  // Collect all toolCallIds that have corresponding tool responses
+  const respondedToolCallIds = new Set<string>()
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      respondedToolCallIds.add(message.toolCallId)
+    }
+  }
+
+  // Filter messages, removing unfinished tool calls from assistant messages
+  const filteredMessages: Message[] = []
+  for (const message of messages) {
+    if (message.role !== 'assistant') {
+      filteredMessages.push(message)
+      continue
+    }
+
+    // Filter out tool-call content parts that don't have responses
+    const filteredContent = message.content.filter((part) => {
+      if (part.type !== 'tool-call') {
+        return true
+      }
+      return respondedToolCallIds.has(part.toolCallId)
+    })
+
+    // Only include the assistant message if it has content after filtering
+    if (filteredContent.length > 0) {
+      filteredMessages.push({
+        ...message,
+        content: filteredContent,
+      })
+    }
+  }
+
+  return filteredMessages
+}
+
 export function getEditedFiles(params: {
   messages: Message[]
   logger: Logger
@@ -308,24 +390,20 @@ export function getEditedFiles(params: {
       .filter(
         (
           m,
-        ): m is ToolMessage & {
-          content: { toolName: 'create_plan' | 'str_replace' | 'write_file' }
-        } => {
+        ): m is CodebuffToolMessage<
+          'create_plan' | 'str_replace' | 'write_file'
+        > => {
           return (
             m.role === 'tool' &&
-            (m.content.toolName === 'create_plan' ||
-              m.content.toolName === 'str_replace' ||
-              m.content.toolName === 'write_file')
+            (m.toolName === 'create_plan' ||
+              m.toolName === 'str_replace' ||
+              m.toolName === 'write_file')
           )
         },
       )
       .map((m) => {
         try {
-          const fileInfo = (
-            m as CodebuffToolMessage<
-              'create_plan' | 'str_replace' | 'write_file'
-            >
-          ).content.output[0].value
+          const fileInfo = m.content[0].value
           if ('errorMessage' in fileInfo) {
             return null
           }
@@ -353,12 +431,12 @@ export function getPreviouslyReadFiles(params: {
   const files: ReturnType<typeof getPreviouslyReadFiles> = []
   for (const message of messages) {
     if (message.role !== 'tool') continue
-    if (message.content.toolName === 'read_files') {
+    if (message.toolName === 'read_files') {
       try {
         files.push(
           ...(
             message as CodebuffToolMessage<'read_files'>
-          ).content.output[0].value.filter(
+          ).content[0].value.filter(
             (
               file,
             ): file is typeof file & { contentOmittedForLength: undefined } =>
@@ -373,10 +451,10 @@ export function getPreviouslyReadFiles(params: {
       }
     }
 
-    if (message.content.toolName === 'find_files') {
+    if (message.toolName === 'find_files') {
       try {
-        const v = (message as CodebuffToolMessage<'find_files'>).content
-          .output[0].value
+        const v = (message as CodebuffToolMessage<'find_files'>).content[0]
+          .value
         if ('message' in v) {
           continue
         }

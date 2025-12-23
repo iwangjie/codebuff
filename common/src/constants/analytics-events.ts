@@ -24,6 +24,8 @@ export enum AnalyticsEvent {
   TERMINAL_COMMAND_COMPLETED_SINGLE = 'cli.terminal_command_completed_single',
   USER_INPUT_COMPLETE = 'cli.user_input_complete',
   UPDATE_CODEBUFF_FAILED = 'cli.update_codebuff_failed',
+  FEEDBACK_SUBMITTED = 'cli.feedback_submitted',
+  FEEDBACK_BUTTON_HOVERED = 'cli.feedback_button_hovered',
 
   // Backend
   AGENT_STEP = 'backend.agent_step',
@@ -99,6 +101,23 @@ export enum AnalyticsEvent {
   CHAT_COMPLETIONS_GENERATION_STARTED = 'api.chat_completions_generation_started',
   CHAT_COMPLETIONS_STREAM_STARTED = 'api.chat_completions_stream_started',
   CHAT_COMPLETIONS_ERROR = 'api.chat_completions_error',
+
+  // Web - Usage API
+  USAGE_API_REQUEST = 'api.usage_request',
+  USAGE_API_AUTH_ERROR = 'api.usage_auth_error',
+
+  // Web - Search API
+  WEB_SEARCH_REQUEST = 'api.web_search_request',
+  WEB_SEARCH_AUTH_ERROR = 'api.web_search_auth_error',
+  WEB_SEARCH_VALIDATION_ERROR = 'api.web_search_validation_error',
+  WEB_SEARCH_INSUFFICIENT_CREDITS = 'api.web_search_insufficient_credits',
+  WEB_SEARCH_ERROR = 'api.web_search_error',
+
+  DOCS_SEARCH_REQUEST = 'api.docs_search_request',
+  DOCS_SEARCH_AUTH_ERROR = 'api.docs_search_auth_error',
+  DOCS_SEARCH_VALIDATION_ERROR = 'api.docs_search_validation_error',
+  DOCS_SEARCH_INSUFFICIENT_CREDITS = 'api.docs_search_insufficient_credits',
+  DOCS_SEARCH_ERROR = 'api.docs_search_error',
 
   // Common
   FLUSH_FAILED = 'common.flush_failed',

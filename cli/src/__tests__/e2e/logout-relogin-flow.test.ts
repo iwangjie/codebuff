@@ -1,3 +1,7 @@
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
+
 import {
   describe,
   test,
@@ -7,16 +11,18 @@ import {
   mock,
   spyOn,
 } from 'bun:test'
-import fs from 'fs'
-import os from 'os'
-import path from 'path'
 
 import {
   saveUserCredentials,
   getUserCredentials,
   logoutUser,
-  type User,
 } from '../../utils/auth'
+import { setProjectRoot } from '../../project-files'
+
+import * as AuthModule from '../../utils/auth'
+import * as CodebuffApiModule from '../../utils/codebuff-api'
+
+type User = AuthModule.User
 
 const ORIGINAL_USER: User = {
   id: 'user-001',
@@ -39,6 +45,8 @@ describe('Logout and Re-login helpers', () => {
 
   beforeEach(() => {
     tempConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), 'manicode-logout-'))
+    // Set project root to avoid "Project root not set" error in logger
+    setProjectRoot(tempConfigDir)
   })
 
   afterEach(() => {
@@ -49,16 +57,21 @@ describe('Logout and Re-login helpers', () => {
   })
 
   const mockConfigPaths = () => {
-    const authModule =
-      require('../../utils/auth') as typeof import('../../utils/auth')
-    spyOn(authModule, 'getConfigDir').mockReturnValue(tempConfigDir)
-    spyOn(authModule, 'getCredentialsPath').mockReturnValue(
+    spyOn(AuthModule, 'getConfigDir').mockReturnValue(tempConfigDir)
+    spyOn(AuthModule, 'getCredentialsPath').mockReturnValue(
       path.join(tempConfigDir, 'credentials.json'),
     )
   }
 
+  const mockLogoutApi = () => {
+    spyOn(CodebuffApiModule, 'getApiClient').mockReturnValue({
+      logout: async () => ({ ok: true, status: 200 }),
+    } as any)
+  }
+
   test('logoutUser removes credentials file and returns true', async () => {
     mockConfigPaths()
+    mockLogoutApi()
     saveUserCredentials(ORIGINAL_USER)
 
     const credentialsPath = path.join(tempConfigDir, 'credentials.json')
@@ -71,6 +84,7 @@ describe('Logout and Re-login helpers', () => {
 
   test('re-login can persist new credentials after logout', async () => {
     mockConfigPaths()
+    mockLogoutApi()
 
     saveUserCredentials(ORIGINAL_USER)
     const firstLoaded = getUserCredentials()

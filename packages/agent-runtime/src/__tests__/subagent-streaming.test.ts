@@ -1,6 +1,7 @@
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
+import { assistantMessage } from '@codebuff/common/util/messages'
 import {
   afterAll,
   beforeAll,
@@ -20,6 +21,7 @@ import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 import type { AgentTemplate } from '../templates/types'
 import type { SendSubagentChunk } from '../tools/handlers/tool/spawn-agents'
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { Mock } from 'bun:test'
 
 describe('Subagent Streaming', () => {
@@ -28,6 +30,10 @@ describe('Subagent Streaming', () => {
   let mockAgentTemplate: any
   let mockWriteToClient: Mock<
     Parameters<typeof handleSpawnAgents>[0]['writeToClient']
+  >
+  let handleSpawnAgentsBaseParams: ParamsExcluding<
+    typeof handleSpawnAgents,
+    'agentState' | 'agentTemplate' | 'localAgentTemplates' | 'toolCall'
   >
 
   beforeEach(() => {
@@ -51,6 +57,24 @@ describe('Subagent Streaming', () => {
       instructionsPrompt: '',
       stepPrompt: '',
     }
+
+    handleSpawnAgentsBaseParams = {
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ancestorRunIds: [],
+      clientSessionId: 'test-session',
+      fileContext: mockFileContext,
+      fingerprintId: 'test-fingerprint',
+      previousToolCallFinished: Promise.resolve(),
+      repoId: undefined,
+      repoUrl: undefined,
+      sendSubagentChunk: mockSendSubagentChunk,
+      signal: new AbortController().signal,
+      system: 'Test system prompt',
+      tools: {},
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      writeToClient: mockWriteToClient,
+    }
   })
 
   beforeAll(() => {
@@ -71,11 +95,9 @@ describe('Subagent Streaming', () => {
       return {
         agentState: {
           ...options.agentState,
-          messageHistory: [
-            { role: 'assistant', content: 'Test response from subagent' },
-          ],
+          messageHistory: [assistantMessage('Test response from subagent')],
         },
-        output: { type: 'lastMessage', value: 'Test response from subagent' },
+        output: { type: 'lastMessage', value: [assistantMessage('Test response from subagent')] },
       }
     })
 
@@ -125,32 +147,15 @@ describe('Subagent Streaming', () => {
       },
     }
 
-    const { result } = handleSpawnAgents({
-      ...TEST_AGENT_RUNTIME_IMPL,
-      repoId: undefined,
-      repoUrl: undefined,
-      previousToolCallFinished: Promise.resolve(),
-      toolCall,
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
-      userInputId: 'test-input',
-      writeToClient: mockWriteToClient,
-      getLatestState: () => ({ messages: [] }),
-      state: {
-        fingerprintId: 'test-fingerprint',
-        userId: TEST_USER_ID,
-        agentTemplate: parentTemplate,
-        localAgentTemplates: {
-          [mockAgentTemplate.id]: mockAgentTemplate,
-        },
-        sendSubagentChunk: mockSendSubagentChunk,
-        messages: [],
-        agentState,
-        system: 'Test system prompt',
+    await handleSpawnAgents({
+      ...handleSpawnAgentsBaseParams,
+      agentState,
+      agentTemplate: parentTemplate,
+      localAgentTemplates: {
+        [mockAgentTemplate.id]: mockAgentTemplate,
       },
+      toolCall,
     })
-
-    await result
 
     // Verify that subagent streaming messages were sent
     expect(mockWriteToClient).toHaveBeenCalledTimes(2)
@@ -191,31 +196,15 @@ describe('Subagent Streaming', () => {
       },
     }
 
-    const { result } = handleSpawnAgents({
-      ...TEST_AGENT_RUNTIME_IMPL,
-      repoId: undefined,
-      repoUrl: undefined,
-      previousToolCallFinished: Promise.resolve(),
-      toolCall,
-      fileContext: mockFileContext,
-      clientSessionId: 'test-session',
-      userInputId: 'test-input-123',
-      writeToClient: () => {},
-      getLatestState: () => ({ messages: [] }),
-      state: {
-        fingerprintId: 'test-fingerprint',
-        userId: TEST_USER_ID,
-        agentTemplate: parentTemplate,
-        localAgentTemplates: {
-          [mockAgentTemplate.id]: mockAgentTemplate,
-        },
-        sendSubagentChunk: mockSendSubagentChunk,
-        messages: [],
-        agentState,
-        system: 'Test system prompt',
+    await handleSpawnAgents({
+      ...handleSpawnAgentsBaseParams,
+      agentState,
+      agentTemplate: parentTemplate,
+      localAgentTemplates: {
+        [mockAgentTemplate.id]: mockAgentTemplate,
       },
+      toolCall,
     })
-    await result
 
     // Verify the streaming messages have consistent agentId and correct agentType
     expect(mockSendSubagentChunk.mock.calls.length).toBeGreaterThanOrEqual(2)
@@ -236,7 +225,7 @@ describe('Subagent Streaming', () => {
     expect(firstCall.agentId).toBe(secondCall.agentId) // Same agent ID
     expect(firstCall.agentType).toBe('thinker')
     expect(secondCall.agentType).toBe('thinker')
-    expect(firstCall.userInputId).toBe('test-input-123')
-    expect(secondCall.userInputId).toBe('test-input-123')
+    expect(firstCall.userInputId).toBe('test-input')
+    expect(secondCall.userInputId).toBe('test-input')
   })
 })

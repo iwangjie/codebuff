@@ -1,11 +1,11 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
-import {
-  endsAgentStepParam,
-  endToolTag,
-  startToolTag,
-  toolNameParam,
-} from '@codebuff/common/tools/constants'
 
+import {
+  createStreamParserState,
+  parseStreamChunk,
+} from './util/stream-xml-parser'
+
+import type { StreamParserState } from './util/stream-xml-parser'
 import type { Model } from '@codebuff/common/old-constants'
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
 import type { StreamChunk } from '@codebuff/common/types/contracts/llm'
@@ -13,17 +13,9 @@ import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type {
   PrintModeError,
   PrintModeText,
-  PrintModeToolCall,
 } from '@codebuff/common/types/print-mode'
 
-const toolExtractionPattern = new RegExp(
-  `${startToolTag}(.*?)${endToolTag}`,
-  'gs',
-)
-
-const completionSuffix = `${JSON.stringify(endsAgentStepParam)}: true\n}${endToolTag}`
-
-export async function* processStreamWithTags(params: {
+export async function* processStreamWithTools(params: {
   stream: AsyncGenerator<StreamChunk, string | null>
   processors: Record<
     string,
@@ -37,9 +29,7 @@ export async function* processStreamWithTags(params: {
     onTagEnd: (tagName: string, params: Record<string, any>) => void
   }
   onError: (tagName: string, errorMessage: string) => void
-  onResponseChunk: (
-    chunk: PrintModeText | PrintModeToolCall | PrintModeError,
-  ) => void
+  onResponseChunk: (chunk: PrintModeText | PrintModeError) => void
   logger: Logger
   loggerOptions?: {
     userId?: string
@@ -47,6 +37,11 @@ export async function* processStreamWithTags(params: {
     agentName?: string
   }
   trackEvent: TrackEventFn
+  executeXmlToolCall: (params: {
+    toolCallId: string
+    toolName: string
+    input: Record<string, unknown>
+  }) => Promise<void>
 }): AsyncGenerator<StreamChunk, string | null> {
   const {
     stream,
@@ -57,88 +52,23 @@ export async function* processStreamWithTags(params: {
     logger,
     loggerOptions,
     trackEvent,
+    executeXmlToolCall,
   } = params
-
   let streamCompleted = false
   let buffer = ''
   let autocompleted = false
 
-  function extractToolCalls(): string[] {
-    const matches: string[] = []
-    let lastIndex = 0
-    for (const match of buffer.matchAll(toolExtractionPattern)) {
-      if (match.index > lastIndex) {
-        onResponseChunk({
-          type: 'text',
-          text: buffer.slice(lastIndex, match.index),
-        })
-      }
-      lastIndex = match.index + match[0].length
-      matches.push(match[1])
-    }
+  // State for parsing XML tool calls from text stream
+  const xmlParserState: StreamParserState = createStreamParserState()
 
-    buffer = buffer.slice(lastIndex)
-    return matches
-  }
+  function processToolCallObject(params: {
+    toolName: string
+    input: any
+    contents?: string
+  }): void {
+    const { toolName, input, contents } = params
 
-  function processToolCallContents(contents: string): void {
-    let parsedParams: any
-    try {
-      parsedParams = JSON.parse(contents)
-    } catch (error: any) {
-      trackEvent({
-        event: AnalyticsEvent.MALFORMED_TOOL_CALL_JSON,
-        userId: loggerOptions?.userId ?? '',
-        properties: {
-          contents: JSON.stringify(contents),
-          model: loggerOptions?.model,
-          agent: loggerOptions?.agentName,
-          error: {
-            name: error.name,
-            message: error.message,
-            stack: error.stack,
-          },
-          autocompleted,
-        },
-        logger,
-      })
-      const shortenedContents =
-        contents.length < 200
-          ? contents
-          : contents.slice(0, 100) + '...' + contents.slice(-100)
-      const errorMessage = `Invalid JSON: ${JSON.stringify(shortenedContents)}\nError: ${error.message}`
-      onResponseChunk({
-        type: 'error',
-        message: errorMessage,
-      })
-      onError('parse_error', errorMessage)
-      return
-    }
-
-    const toolName = parsedParams[toolNameParam] as keyof typeof processors
-    const processor =
-      typeof toolName === 'string'
-        ? processors[toolName] ?? defaultProcessor(toolName)
-        : undefined
-    if (!processor) {
-      trackEvent({
-        event: AnalyticsEvent.UNKNOWN_TOOL_CALL,
-        userId: loggerOptions?.userId ?? '',
-        properties: {
-          contents,
-          toolName,
-          model: loggerOptions?.model,
-          agent: loggerOptions?.agentName,
-          autocompleted,
-        },
-        logger,
-      })
-      onError(
-        'parse_error',
-        `Unknown tool ${JSON.stringify(toolName)} for tool call: ${contents}`,
-      )
-      return
-    }
+    const processor = processors[toolName] ?? defaultProcessor(toolName)
 
     trackEvent({
       event: AnalyticsEvent.TOOL_USE,
@@ -146,55 +76,79 @@ export async function* processStreamWithTags(params: {
       properties: {
         toolName,
         contents,
-        parsedParams,
+        parsedParams: input,
         autocompleted,
         model: loggerOptions?.model,
         agent: loggerOptions?.agentName,
       },
       logger,
     })
-    delete parsedParams[toolNameParam]
 
     processor.onTagStart(toolName, {})
-    processor.onTagEnd(toolName, parsedParams)
+    processor.onTagEnd(toolName, input)
   }
 
-  function extractToolsFromBufferAndProcess(forceFlush = false) {
-    const matches = extractToolCalls()
-    matches.forEach(processToolCallContents)
-    if (forceFlush) {
+  function flush() {
+    if (buffer) {
       onResponseChunk({
         type: 'text',
         text: buffer,
       })
-      buffer = ''
     }
+    buffer = ''
   }
 
-  function* processChunk(
+  async function* processChunk(
     chunk: StreamChunk | undefined,
-  ): Generator<StreamChunk> {
-    if (chunk !== undefined && chunk.type === 'text') {
-      buffer += chunk.text
-    }
-    extractToolsFromBufferAndProcess()
-
+  ): AsyncGenerator<StreamChunk> {
     if (chunk === undefined) {
+      flush()
       streamCompleted = true
-      if (buffer.includes(startToolTag)) {
-        buffer += completionSuffix
-        chunk = {
-          type: 'text',
-          text: completionSuffix,
-        }
-        autocompleted = true
-      }
-      extractToolsFromBufferAndProcess(true)
+      return
     }
 
-    if (chunk) {
-      yield chunk
+    if (chunk.type === 'text') {
+      // Parse XML tool calls from the text stream
+      const { filteredText, toolCalls } = parseStreamChunk(
+        chunk.text,
+        xmlParserState,
+      )
+
+      if (filteredText) {
+        buffer += filteredText
+        yield {
+          type: 'text',
+          text: filteredText,
+        }
+      }
+
+      // Flush buffer before yielding tool calls so text event is sent first
+      if (toolCalls.length > 0) {
+        flush()
+      }
+
+      // Then process and yield any XML tool calls found
+      for (const toolCall of toolCalls) {
+        const toolCallId = `xml-${crypto.randomUUID().slice(0, 8)}`
+
+        // Execute the tool immediately if callback provided, pausing the stream
+        // The callback handles emitting tool_call and tool_result events
+        await executeXmlToolCall({
+          toolCallId,
+          toolName: toolCall.toolName,
+          input: toolCall.input,
+        })
+      }
+      return
+    } else {
+      flush()
     }
+
+    if (chunk.type === 'tool-call') {
+      processToolCallObject(chunk)
+    }
+
+    yield chunk
   }
 
   let messageId: string | null = null
@@ -207,14 +161,11 @@ export async function* processStreamWithTags(params: {
     if (streamCompleted) {
       break
     }
-
     yield* processChunk(value)
   }
-
   if (!streamCompleted) {
     // After the stream ends, try parsing one last time in case there's leftover text
     yield* processChunk(undefined)
   }
-
   return messageId
 }

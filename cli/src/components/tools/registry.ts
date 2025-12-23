@@ -1,4 +1,16 @@
-import type { ToolName } from '@codebuff/sdk'
+import { CodeSearchComponent } from './code-search'
+import { GlobComponent } from './glob'
+import { ListDirectoryComponent } from './list-directory'
+import { ReadDocsComponent } from './read-docs'
+import { ReadFilesComponent } from './read-files'
+import { ReadSubtreeComponent } from './read-subtree'
+import { RunTerminalCommandComponent } from './run-terminal-command'
+import { StrReplaceComponent } from './str-replace'
+import { SuggestFollowupsComponent } from './suggest-followups'
+import { TaskCompleteComponent } from './task-complete'
+import { WriteFileComponent } from './write-file'
+import { WriteTodosComponent } from './write-todos'
+
 import type {
   ToolComponent,
   ToolRenderConfig,
@@ -6,10 +18,7 @@ import type {
   ToolBlock,
 } from './types'
 import type { ChatTheme } from '../../types/theme-system'
-
-import { ListDirectoryComponent } from './list-directory'
-import { RunTerminalCommandComponent } from './run-terminal-command'
-import { CodeSearchComponent } from './code-search'
+import type { ToolName } from '@codebuff/sdk'
 
 /**
  * Registry of all tool-specific UI components.
@@ -17,8 +26,20 @@ import { CodeSearchComponent } from './code-search'
  */
 const toolComponentRegistry = new Map<ToolName, ToolComponent>([
   [CodeSearchComponent.toolName, CodeSearchComponent],
+  [GlobComponent.toolName, GlobComponent],
   [ListDirectoryComponent.toolName, ListDirectoryComponent],
   [RunTerminalCommandComponent.toolName, RunTerminalCommandComponent],
+  [ReadDocsComponent.toolName, ReadDocsComponent],
+  [ReadFilesComponent.toolName, ReadFilesComponent],
+  [ReadSubtreeComponent.toolName, ReadSubtreeComponent],
+  [WriteTodosComponent.toolName, WriteTodosComponent],
+  [StrReplaceComponent.toolName, StrReplaceComponent],
+  [SuggestFollowupsComponent.toolName, SuggestFollowupsComponent],
+  [WriteFileComponent.toolName, WriteFileComponent],
+  [TaskCompleteComponent.toolName, TaskCompleteComponent],
+  // Propose tools reuse the same rendering as their base counterparts
+  ['propose_str_replace', StrReplaceComponent],
+  ['propose_write_file', WriteFileComponent],
 ])
 
 /**
@@ -56,11 +77,11 @@ export function renderToolComponent(
   toolBlock: ToolBlock,
   theme: ChatTheme,
   options: ToolRenderOptions,
-): ToolRenderConfig | null {
+): ToolRenderConfig | undefined {
   const component = getToolComponent(toolBlock.toolName)
 
-  if (!component) {
-    return null
+  if (component === undefined) {
+    return undefined
   }
 
   try {
@@ -70,7 +91,7 @@ export function renderToolComponent(
       `Error rendering tool component for ${toolBlock.toolName}:`,
       error,
     )
-    return null
+    return undefined
   }
 }
 

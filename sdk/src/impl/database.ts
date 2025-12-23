@@ -1,10 +1,10 @@
 import { validateSingleAgent } from '@codebuff/common/templates/agent-validation'
-import { userColumns } from '@codebuff/common/types/contracts/database'
 import { DynamicAgentTemplateSchema } from '@codebuff/common/types/dynamic-agent-template'
 import { getErrorObject } from '@codebuff/common/util/error'
 import z from 'zod/v4'
 
 import { WEBSITE_URL } from '../constants'
+import { AuthenticationError, ErrorCodes, NetworkError } from '../errors'
 
 import type {
   AddAgentStepFn,
@@ -18,9 +18,13 @@ import type {
 import type { DynamicAgentTemplate } from '@codebuff/common/types/dynamic-agent-template'
 import type { ParamsOf } from '@codebuff/common/types/function-params'
 
+type CachedUserInfo = Partial<
+  NonNullable<Awaited<GetUserInfoFromApiKeyOutput<UserColumn>>>
+>
+
 const userInfoCache: Record<
   string,
-  Awaited<GetUserInfoFromApiKeyOutput<UserColumn>>
+  CachedUserInfo | null
 > = {}
 
 const agentsResponseSchema = z.object({
@@ -33,57 +37,115 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
 ): GetUserInfoFromApiKeyOutput<T> {
   const { apiKey, fields, logger } = params
 
-  if (apiKey in userInfoCache) {
-    const userInfo = userInfoCache[apiKey]
-    if (userInfo === null) {
-      return userInfo
-    }
-    return Object.fromEntries(
-      fields.map((field) => [field, userInfo[field]]),
-    ) as {
-      [K in (typeof fields)[number]]: (typeof userInfo)[K]
-    }
+  const cached = userInfoCache[apiKey]
+  if (cached === null) {
+    throw new AuthenticationError('Authentication failed', 401)
+  }
+  if (
+    cached &&
+    fields.every((field) =>
+      Object.prototype.hasOwnProperty.call(cached, field),
+    )
+  ) {
+    return Object.fromEntries(fields.map((field) => [field, cached[field]])) as {
+      [K in T]: CachedUserInfo[K]
+    } as Awaited<GetUserInfoFromApiKeyOutput<T>>
   }
 
+  const fieldsToFetch = cached
+    ? fields.filter(
+        (field) => !Object.prototype.hasOwnProperty.call(cached, field),
+      )
+    : fields
+
   const urlParams = new URLSearchParams({
-    fields: userColumns.join(','),
+    fields: fieldsToFetch.join(','),
   })
   const url = new URL(`/api/v1/me?${urlParams}`, WEBSITE_URL)
 
+  let response: Response
   try {
-    const response = await fetch(url, {
+    response = await fetch(url, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${apiKey}`,
       },
     })
-
-    if (!response.ok) {
-      logger.error(
-        { apiKey, fields, response },
-        'getUserInfoFromApiKey request failed',
-      )
-      return null
-    }
-
-    userInfoCache[apiKey] = await response.json()
   } catch (error) {
     logger.error(
       { error: getErrorObject(error), apiKey, fields },
-      'getUserInfoFromApiKey error',
+      'getUserInfoFromApiKey network error',
     )
-    return null
+    // Network-level failure: DNS, connection refused, timeout, etc.
+    throw new NetworkError('Network request failed', ErrorCodes.NETWORK_ERROR, undefined, error)
+  }
+
+  if (response.status === 401 || response.status === 403 || response.status === 404) {
+    logger.error(
+      { apiKey, fields, status: response.status },
+      'getUserInfoFromApiKey authentication failed',
+    )
+    // Don't cache auth failures - allow retry with potentially updated credentials
+    delete userInfoCache[apiKey]
+    // If the server returns 404 for invalid credentials, surface as 401 to callers
+    const normalizedStatus = response.status === 404 ? 401 : response.status
+    throw new AuthenticationError('Authentication failed', normalizedStatus)
+  }
+
+  if (response.status >= 500 && response.status <= 599) {
+    logger.error(
+      { apiKey, fields, status: response.status },
+      'getUserInfoFromApiKey server error',
+    )
+    throw new NetworkError(
+      'Server error',
+      response.status === 503 ? ErrorCodes.SERVICE_UNAVAILABLE : ErrorCodes.SERVER_ERROR,
+      response.status,
+    )
+  }
+
+  if (!response.ok) {
+    logger.error(
+      { apiKey, fields, status: response.status },
+      'getUserInfoFromApiKey request failed',
+    )
+    throw new NetworkError('Request failed', ErrorCodes.UNKNOWN_ERROR, response.status)
+  }
+
+  const cachedBeforeMerge = userInfoCache[apiKey]
+  try {
+    const fetchedFields = (await response.json()) as CachedUserInfo
+    userInfoCache[apiKey] = {
+      ...(cachedBeforeMerge ?? {}),
+      ...fetchedFields,
+    }
+  } catch (error) {
+    logger.error(
+      { error: getErrorObject(error), apiKey, fields },
+      'getUserInfoFromApiKey JSON parse error',
+    )
+    throw new NetworkError('Failed to parse response', ErrorCodes.UNKNOWN_ERROR, response.status, error)
   }
 
   const userInfo = userInfoCache[apiKey]
   if (userInfo === null) {
-    return userInfo
+    throw new AuthenticationError('Authentication failed', 401)
+  }
+  if (
+    !userInfo ||
+    !fields.every((field) =>
+      Object.prototype.hasOwnProperty.call(userInfo, field),
+    )
+  ) {
+    logger.error(
+      { apiKey, fields },
+      'getUserInfoFromApiKey: response missing required fields',
+    )
+    throw new NetworkError('Request failed', ErrorCodes.UNKNOWN_ERROR, response.status)
   }
   return Object.fromEntries(
     fields.map((field) => [field, userInfo[field]]),
-  ) as {
-    [K in (typeof fields)[number]]: (typeof userInfo)[K]
-  }
+  ) as Awaited<GetUserInfoFromApiKeyOutput<T>>
 }
 
 export async function fetchAgentFromDatabase(

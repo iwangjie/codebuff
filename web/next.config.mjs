@@ -1,5 +1,5 @@
 import createMDX from '@next/mdx'
-import { withContentlayer } from 'next-contentlayer'
+import { withContentlayer } from 'next-contentlayer2'
 
 const withMDX = createMDX({
   extension: /\.mdx?$/,
@@ -33,6 +33,16 @@ const nextConfig = {
       'encoding',
       'perf_hooks',
       'async_hooks',
+    )
+
+    // Externalize code-map package to avoid bundling tree-sitter WASM files
+    // The web app doesn't need code-map functionality (only SDK CLI tools do)
+    config.externals.push(
+      '@codebuff/code-map',
+      '@codebuff/code-map/parse',
+      '@codebuff/code-map/languages',
+      /^@codebuff\/code-map/,
+      'esbuild', // Used by SDK's load-agents.ts
     )
 
     // Suppress contentlayer webpack cache warnings

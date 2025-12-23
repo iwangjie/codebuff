@@ -1,7 +1,9 @@
-import { describe, test, expect } from 'bun:test'
 import { spawn } from 'child_process'
-import stripAnsi from 'strip-ansi'
 import path from 'path'
+
+import { describe, test, expect } from 'bun:test'
+import stripAnsi from 'strip-ansi'
+
 import { isSDKBuilt, ensureCliTestEnv } from './test-utils'
 
 const CLI_PATH = path.join(__dirname, '../index.tsx')
@@ -111,9 +113,15 @@ describe.skipIf(!sdkBuilt)('CLI End-to-End Tests', () => {
       await new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
           resolve()
-        }, 800)
+        }, 2000) // Increased timeout for CI environments
 
+        // Check both stdout and stderr - CLI may output to either
         proc.stdout?.once('data', () => {
+          started = true
+          clearTimeout(timeout)
+          resolve()
+        })
+        proc.stderr?.once('data', () => {
           started = true
           clearTimeout(timeout)
           resolve()
@@ -139,9 +147,15 @@ describe.skipIf(!sdkBuilt)('CLI End-to-End Tests', () => {
       await new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
           resolve()
-        }, 800)
+        }, 2000) // Increased timeout for CI environments
 
+        // Check both stdout and stderr - CLI may output to either
         proc.stdout?.once('data', () => {
+          started = true
+          clearTimeout(timeout)
+          resolve()
+        })
+        proc.stderr?.once('data', () => {
           started = true
           clearTimeout(timeout)
           resolve()

@@ -5,7 +5,7 @@ const definition: SecretAgentDefinition = {
   id: 'file-lister',
   displayName: 'Liszt the File Lister',
   publisher,
-  model: 'anthropic/claude-haiku-4.5',
+  model: 'x-ai/grok-4-fast',
   spawnerPrompt:
     'Lists up to 12 files that are relevant to the prompt within the given directories. Unless you know which directories are relevant, omit the directories parameter. This agent is great for finding files that could be relevant to the prompt.',
   inputSchema: {
@@ -33,11 +33,12 @@ const definition: SecretAgentDefinition = {
 
   systemPrompt: `You are an expert at finding relevant files in a codebase and listing them out.`,
   instructionsPrompt: `Instructions:
-- Do not use any tools.
-- Do not write any analysis.
-- List out the full paths of up to 12 files that are relevant to the prompt, separated by newlines. Each file path is relative to the project root.
+- Do not write any introductory commentary.
+- Do not write any analysis or any English text at all.
+- Do not use any more tools. Do not call read_subtree again.
+- List out the full paths of up to 12 files that are relevant to the prompt, separated by newlines. Each file path is relative to the project root. Don't forget to include all the subdirectories in the path -- sometimes you have forgotten to include 'src' in the path.
 
-<example_output>
+<example_response>
 packages/core/src/index.ts
 packages/core/src/api/server.ts
 packages/core/src/api/routes/user.ts
@@ -50,10 +51,10 @@ docs/routes/index.md
 docs/routes/user.md
 package.json
 README.md
-</example_output>
+</example_response>
 
-Do not write an introduction. Do not use any tools. Do not write anything else other than the file paths.
-  `.trim(),
+Again: Do not write anything else other than the file paths on new lines.
+`.trim(),
 
   handleSteps: function* ({ params }) {
     const directories = params?.directories ?? []
@@ -61,7 +62,7 @@ Do not write an introduction. Do not use any tools. Do not write anything else o
       toolName: 'read_subtree',
       input: {
         paths: directories,
-        maxTokens: 200_000,
+        maxTokens: 500_000,
       },
     }
 

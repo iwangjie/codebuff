@@ -70,9 +70,10 @@ describe('QuickJS Sandbox Generator', () => {
     mockParams = {
       ...agentRuntimeImpl,
       runId: 'test-run-id',
+      ancestorRunIds: [],
       repoId: undefined,
       repoUrl: undefined,
-      system: undefined,
+      system: 'Test system prompt',
       agentState: mockAgentState,
       template: mockTemplate,
       prompt: 'Test prompt',
@@ -82,10 +83,13 @@ describe('QuickJS Sandbox Generator', () => {
       clientSessionId: 'test-session',
       fingerprintId: 'test-fingerprint',
       onResponseChunk: () => {},
+      onCostCalculated: async () => {},
       fileContext: mockFileContext,
       localAgentTemplates: {},
       stepsComplete: false,
       stepNumber: 1,
+      signal: new AbortController().signal,
+      tools: {},
     }
   })
 

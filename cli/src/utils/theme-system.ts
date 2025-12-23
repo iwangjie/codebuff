@@ -2,6 +2,8 @@ import { existsSync, readFileSync, readdirSync, statSync, watch } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 
+import type { CliEnv } from '../types/env'
+import { getCliEnv } from './env'
 import type { MarkdownPalette } from './markdown-renderer'
 import type {
   ChatTheme,
@@ -9,6 +11,100 @@ import type {
   MarkdownThemeOverrides,
   ThemeName,
 } from '../types/theme-system'
+
+/**
+ * Check if the terminal supports truecolor (24-bit color).
+ * Terminals like macOS Terminal.app only support 256 colors and cannot
+ * render hex colors properly - they need ANSI color name fallbacks.
+ */
+// Cache the truecolor support result since it won't change during runtime
+let _truecolorSupport: boolean | null = null
+
+export function supportsTruecolor(env: CliEnv = getCliEnv()): boolean {
+  if (_truecolorSupport !== null) {
+    return _truecolorSupport
+  }
+  
+  const termProgram = env.TERM_PROGRAM?.toLowerCase() ?? ''
+  
+  // Terminal.app (Apple_Terminal) does NOT support truecolor - only 256 colors
+  if (termProgram === 'apple_terminal') {
+    _truecolorSupport = false
+    return false
+  }
+  
+  const colorterm = env.COLORTERM?.toLowerCase()
+  if (colorterm === 'truecolor' || colorterm === '24bit') {
+    _truecolorSupport = true
+    return true
+  }
+  
+  // Some terminals that are known to support truecolor
+  const truecolorTerminals = [
+    'iterm.app',
+    'hyper',
+    'wezterm',
+    'alacritty',
+    'kitty',
+    'ghostty',
+    'vscode',
+  ]
+  
+  if (truecolorTerminals.some(t => termProgram.includes(t))) {
+    _truecolorSupport = true
+    return true
+  }
+  
+  // Check TERM for known truecolor-capable values
+  const term = env.TERM?.toLowerCase() ?? ''
+  if (term.includes('truecolor') || term.includes('24bit')) {
+    _truecolorSupport = true
+    return true
+  }
+  
+  // xterm-kitty, alacritty, etc.
+  if (term === 'xterm-kitty' || term === 'alacritty' || term.includes('ghostty')) {
+    _truecolorSupport = true
+    return true
+  }
+  
+  _truecolorSupport = false
+  return false
+}
+
+
+
+/**
+ * Get the block color for the logo based on theme and terminal capabilities.
+ * In dark mode: white (#ffffff or 'white')
+ * In light mode: black (#000000 or 'black')
+ */
+export function getLogoBlockColor(
+  themeName: ThemeName,
+  env: CliEnv = getCliEnv(),
+): string {
+  const isTruecolor = supportsTruecolor(env)
+  if (themeName === 'dark') {
+    return isTruecolor ? '#ffffff' : 'white'
+  }
+  return isTruecolor ? '#000000' : 'black'
+}
+
+/**
+ * Get the accent color for the logo based on theme and terminal capabilities.
+ * Returns the primary green color with appropriate fallback.
+ */
+export function getLogoAccentColor(
+  themeName: ThemeName,
+  env: CliEnv = getCliEnv(),
+): string {
+  const isTruecolor = supportsTruecolor(env)
+  // The primary green color - 'lime' is CSS bright green
+  if (themeName === 'dark') {
+    return isTruecolor ? '#9EFC62' : 'lime'
+  }
+  return isTruecolor ? '#65A83E' : 'green'
+}
 
 const IDE_THEME_INFERENCE = {
   dark: [
@@ -32,6 +128,7 @@ const IDE_THEME_INFERENCE = {
     'tokyo',
     'abyss',
     'zed dark',
+    'vs dark',
   ],
   light: [
     'light',
@@ -47,6 +144,7 @@ const IDE_THEME_INFERENCE = {
     'pastel',
     'cream',
     'zed light',
+    'vs light',
   ],
 } as const
 
@@ -125,7 +223,9 @@ const collectExistingPaths = (candidates: string[]): string[] => {
   return [...seen]
 }
 
-const resolveVSCodeSettingsPaths = (): string[] => {
+const resolveVSCodeSettingsPaths = (
+  env: CliEnv = getCliEnv(),
+): string[] => {
   const settings: string[] = []
   const home = homedir()
 
@@ -135,14 +235,14 @@ const resolveVSCodeSettingsPaths = (): string[] => {
       settings.push(join(base, product, 'User', 'settings.json'))
     }
   } else if (process.platform === 'win32') {
-    const appData = process.env.APPDATA
+    const appData = env.APPDATA
     if (appData) {
       for (const product of VS_CODE_PRODUCT_DIRS) {
         settings.push(join(appData, product, 'User', 'settings.json'))
       }
     }
   } else {
-    const configDir = process.env.XDG_CONFIG_HOME ?? join(home, '.config')
+    const configDir = env.XDG_CONFIG_HOME ?? join(home, '.config')
     for (const product of VS_CODE_PRODUCT_DIRS) {
       settings.push(join(configDir, product, 'User', 'settings.json'))
     }
@@ -151,14 +251,17 @@ const resolveVSCodeSettingsPaths = (): string[] => {
   return settings
 }
 
-const resolveJetBrainsLafPaths = (): string[] => {
+const resolveJetBrainsLafPaths = (
+  env: CliEnv = getCliEnv(),
+): string[] => {
   const candidates: string[] = []
 
-  for (const key of ['IDE_CONFIG_DIR', 'JB_IDE_CONFIG_DIR']) {
-    const raw = process.env[key]
-    if (raw) {
-      candidates.push(join(raw, 'options', 'laf.xml'))
-    }
+  // Check IDE config dirs
+  if (env.IDE_CONFIG_DIR) {
+    candidates.push(join(env.IDE_CONFIG_DIR, 'options', 'laf.xml'))
+  }
+  if (env.JB_IDE_CONFIG_DIR) {
+    candidates.push(join(env.JB_IDE_CONFIG_DIR, 'options', 'laf.xml'))
   }
 
   const home = homedir()
@@ -167,7 +270,7 @@ const resolveJetBrainsLafPaths = (): string[] => {
   if (process.platform === 'darwin') {
     baseDirs.push(join(home, 'Library', 'Application Support', 'JetBrains'))
   } else if (process.platform === 'win32') {
-    const appData = process.env.APPDATA
+    const appData = env.APPDATA
     if (appData) {
       baseDirs.push(join(appData, 'JetBrains'))
     }
@@ -198,13 +301,15 @@ const resolveJetBrainsLafPaths = (): string[] => {
   return candidates
 }
 
-const resolveZedSettingsPaths = (): string[] => {
+const resolveZedSettingsPaths = (
+  env: CliEnv = getCliEnv(),
+): string[] => {
   const home = homedir()
   const paths: string[] = []
 
   const configDirs = new Set<string>()
 
-  const xdgConfig = process.env.XDG_CONFIG_HOME ?? join(home, '.config')
+  const xdgConfig = env.XDG_CONFIG_HOME ?? join(home, '.config')
   configDirs.add(join(xdgConfig, 'zed'))
   configDirs.add(join(xdgConfig, 'dev.zed.Zed'))
 
@@ -212,7 +317,7 @@ const resolveZedSettingsPaths = (): string[] => {
     configDirs.add(join(home, 'Library', 'Application Support', 'Zed'))
     configDirs.add(join(home, 'Library', 'Application Support', 'dev.zed.Zed'))
   } else if (process.platform === 'win32') {
-    const appData = process.env.APPDATA
+    const appData = env.APPDATA
     if (appData) {
       configDirs.add(join(appData, 'Zed'))
       configDirs.add(join(appData, 'dev.zed.Zed'))
@@ -235,6 +340,7 @@ const resolveZedSettingsPaths = (): string[] => {
 }
 
 const extractVSCodeTheme = (content: string): ThemeName | null => {
+  // Try standard colorTheme setting
   const colorThemeMatch = content.match(
     /"workbench\.colorTheme"\s*:\s*"([^"]+)"/i,
   )
@@ -243,18 +349,44 @@ const extractVSCodeTheme = (content: string): ThemeName | null => {
     if (inferred) return inferred
   }
 
-  const themeKindEnv =
-    process.env.VSCODE_THEME_KIND ?? process.env.VSCODE_COLOR_THEME_KIND
-  if (themeKindEnv) {
-    const normalized = themeKindEnv.trim().toLowerCase()
-    if (normalized === 'dark' || normalized === 'hc') return 'dark'
-    if (normalized === 'light') return 'light'
+  // Check if auto-detect is enabled and try preferred themes
+  const autoDetectMatch = content.match(
+    /"window\.autoDetectColorScheme"\s*:\s*(true|false)/i,
+  )
+  const autoDetectEnabled = autoDetectMatch?.[1]?.toLowerCase() === 'true'
+
+  if (autoDetectEnabled) {
+    // Try to extract both preferred themes and infer from their names
+    const preferredDarkMatch = content.match(
+      /"workbench\.preferredDarkColorTheme"\s*:\s*"([^"]+)"/i,
+    )
+    if (preferredDarkMatch) {
+      const inferred = inferThemeFromName(preferredDarkMatch[1])
+      if (inferred) return inferred
+    }
+
+    const preferredLightMatch = content.match(
+      /"workbench\.preferredLightColorTheme"\s*:\s*"([^"]+)"/i,
+    )
+    if (preferredLightMatch) {
+      const inferred = inferThemeFromName(preferredLightMatch[1])
+      if (inferred) return inferred
+    }
   }
 
   return null
 }
 
 const extractJetBrainsTheme = (content: string): ThemeName | null => {
+  // Check if autodetect is enabled (Sync with OS setting)
+  const autodetectMatch = content.match(
+    /<component[^>]+name="LafManager"[^>]+autodetect="(true|false)"/i,
+  )
+  if (autodetectMatch?.[1]?.toLowerCase() === 'true') {
+    // When syncing with OS, return null to trigger platform detection
+    return null
+  }
+
   const normalized = content.toLowerCase()
   if (normalized.includes('darcula') || normalized.includes('dark')) {
     return 'dark'
@@ -267,40 +399,63 @@ const extractJetBrainsTheme = (content: string): ThemeName | null => {
   return null
 }
 
-const isVSCodeFamilyTerminal = (): boolean => {
-  if (process.env.TERM_PROGRAM?.toLowerCase() === 'vscode') {
+const isVSCodeFamilyTerminal = (
+  env: CliEnv = getCliEnv(),
+): boolean => {
+  if (env.TERM_PROGRAM?.toLowerCase() === 'vscode') {
     return true
   }
 
-  for (const key of VS_CODE_FAMILY_ENV_KEYS) {
-    if (process.env[key]) {
-      return true
-    }
+  // Check VS Code family env keys
+  if (
+    env.VSCODE_GIT_IPC_HANDLE ||
+    env.VSCODE_PID ||
+    env.VSCODE_CWD ||
+    env.VSCODE_NLS_CONFIG ||
+    env.CURSOR_PORT ||
+    env.CURSOR
+  ) {
+    return true
   }
 
   return false
 }
 
-const isJetBrainsTerminal = (): boolean => {
-  if (process.env.TERMINAL_EMULATOR?.toLowerCase().includes('jetbrains')) {
+const isJetBrainsTerminal = (
+  env: CliEnv = getCliEnv(),
+): boolean => {
+  if (env.TERMINAL_EMULATOR?.toLowerCase().includes('jetbrains')) {
     return true
   }
 
-  for (const key of JETBRAINS_ENV_KEYS) {
-    if (process.env[key]) {
-      return true
-    }
+  // Check JetBrains env keys
+  if (
+    env.JETBRAINS_REMOTE_RUN ||
+    env.IDEA_INITIAL_DIRECTORY ||
+    env.IDE_CONFIG_DIR ||
+    env.JB_IDE_CONFIG_DIR
+  ) {
+    return true
   }
 
   return false
 }
 
-const detectVSCodeTheme = (): ThemeName | null => {
-  if (!isVSCodeFamilyTerminal()) {
+const isZedTerminal = (
+  env: CliEnv = getCliEnv(),
+): boolean => {
+  const termProgram = env.TERM_PROGRAM?.toLowerCase()
+  return termProgram === 'zed' || false
+}
+
+const detectVSCodeTheme = (
+  env: CliEnv = getCliEnv(),
+): ThemeName | null => {
+  if (!isVSCodeFamilyTerminal(env)) {
     return null
   }
 
-  const settingsPaths = collectExistingPaths(resolveVSCodeSettingsPaths())
+  const settingsPaths = collectExistingPaths(resolveVSCodeSettingsPaths(env))
 
   for (const settingsPath of settingsPaths) {
     const content = safeReadFile(settingsPath)
@@ -309,10 +464,19 @@ const detectVSCodeTheme = (): ThemeName | null => {
     if (theme) {
       return theme
     }
+
+    // If extractVSCodeTheme returned null but auto-detect is enabled,
+    // use platform theme as fallback
+    const autoDetectMatch = content.match(
+      /"window\.autoDetectColorScheme"\s*:\s*(true|false)/i,
+    )
+    if (autoDetectMatch?.[1]?.toLowerCase() === 'true') {
+      return detectPlatformTheme()
+    }
   }
 
   const themeKindEnv =
-    process.env.VSCODE_THEME_KIND ?? process.env.VSCODE_COLOR_THEME_KIND
+    env.VSCODE_THEME_KIND ?? env.VSCODE_COLOR_THEME_KIND
   if (themeKindEnv) {
     const normalized = themeKindEnv.trim().toLowerCase()
     if (normalized === 'dark' || normalized === 'hc') return 'dark'
@@ -322,12 +486,14 @@ const detectVSCodeTheme = (): ThemeName | null => {
   return null
 }
 
-const detectJetBrainsTheme = (): ThemeName | null => {
-  if (!isJetBrainsTerminal()) {
+const detectJetBrainsTheme = (
+  env: CliEnv = getCliEnv(),
+): ThemeName | null => {
+  if (!isJetBrainsTerminal(env)) {
     return null
   }
 
-  const lafPaths = collectExistingPaths(resolveJetBrainsLafPaths())
+  const lafPaths = collectExistingPaths(resolveJetBrainsLafPaths(env))
 
   for (const lafPath of lafPaths) {
     const content = safeReadFile(lafPath)
@@ -335,6 +501,15 @@ const detectJetBrainsTheme = (): ThemeName | null => {
     const theme = extractJetBrainsTheme(content)
     if (theme) {
       return theme
+    }
+
+    // If extractJetBrainsTheme returned null, check if autodetect is enabled
+    // and fall back to platform detection
+    const autodetectMatch = content.match(
+      /<component[^>]+name="LafManager"[^>]+autodetect="(true|false)"/i,
+    )
+    if (autodetectMatch?.[1]?.toLowerCase() === 'true') {
+      return detectPlatformTheme()
     }
   }
 
@@ -355,18 +530,15 @@ const extractZedTheme = (content: string): ThemeName | null => {
       const modeRaw = themeConfig.mode
       if (typeof modeRaw === 'string') {
         const mode = modeRaw.toLowerCase()
+        // If mode is 'system', return null to trigger platform detection
+        if (mode === 'system') {
+          return null
+        }
         if (mode === 'dark' || mode === 'light') {
           candidates.push(mode)
           const modeTheme = themeConfig[mode]
           if (typeof modeTheme === 'string') {
             candidates.push(modeTheme)
-          }
-        } else if (mode === 'system') {
-          const platformTheme = detectPlatformTheme()
-          candidates.push(platformTheme)
-          const platformThemeName = themeConfig[platformTheme]
-          if (typeof platformThemeName === 'string') {
-            candidates.push(platformThemeName)
           }
         }
       }
@@ -419,8 +591,14 @@ const extractZedTheme = (content: string): ThemeName | null => {
   return null
 }
 
-const detectZedTheme = (): ThemeName | null => {
-  const settingsPaths = collectExistingPaths(resolveZedSettingsPaths())
+const detectZedTheme = (
+  env: CliEnv = getCliEnv(),
+): ThemeName | null => {
+  if (!isZedTerminal(env)) {
+    return null
+  }
+
+  const settingsPaths = collectExistingPaths(resolveZedSettingsPaths(env))
   for (const settingsPath of settingsPaths) {
     const content = safeReadFile(settingsPath)
     if (!content) continue
@@ -429,31 +607,54 @@ const detectZedTheme = (): ThemeName | null => {
     if (theme) {
       return theme
     }
-  }
 
-  return null
-}
-
-const detectIDETheme = (): ThemeName | null => {
-  const detectors = [detectVSCodeTheme, detectJetBrainsTheme, detectZedTheme]
-  for (const detector of detectors) {
-    const theme = detector()
-    if (theme) {
-      return theme
+    // If extractZedTheme returned null, check if theme mode is 'system'
+    // and fall back to platform detection
+    try {
+      const sanitized = stripJsonStyleComments(content)
+      const parsed = JSON.parse(sanitized) as Record<string, unknown>
+      const themeSetting = parsed.theme
+      if (themeSetting && typeof themeSetting === 'object') {
+        const themeConfig = themeSetting as Record<string, unknown>
+        const modeRaw = themeConfig.mode
+        if (typeof modeRaw === 'string' && modeRaw.toLowerCase() === 'system') {
+          return detectPlatformTheme()
+        }
+      }
+    } catch {
+      // Ignore parsing errors
     }
   }
+
   return null
 }
 
-export const getIDEThemeConfigPaths = (): string[] => {
+export const detectIDETheme = (
+  env: CliEnv = getCliEnv(),
+): ThemeName | null => {
+  const theme = detectVSCodeTheme(env)
+  if (theme) return theme
+  
+  const jbTheme = detectJetBrainsTheme(env)
+  if (jbTheme) return jbTheme
+  
+  const zedTheme = detectZedTheme(env)
+  if (zedTheme) return zedTheme
+  
+  return null
+}
+
+export const getIDEThemeConfigPaths = (
+  env: CliEnv = getCliEnv(),
+): string[] => {
   const paths = new Set<string>()
-  for (const path of resolveVSCodeSettingsPaths()) {
+  for (const path of resolveVSCodeSettingsPaths(env)) {
     paths.add(path)
   }
-  for (const path of resolveJetBrainsLafPaths()) {
+  for (const path of resolveJetBrainsLafPaths(env)) {
     paths.add(path)
   }
-  for (const path of resolveZedSettingsPaths()) {
+  for (const path of resolveZedSettingsPaths(env)) {
     paths.add(path)
   }
   return [...paths]
@@ -466,11 +667,6 @@ type ChatThemeOverrides = Partial<Omit<ChatTheme, 'markdown'>> & {
 type ThemeOverrideConfig = Partial<Record<ThemeName, ChatThemeOverrides>> & {
   all?: ChatThemeOverrides
 }
-
-const CHAT_THEME_ENV_KEYS = [
-  'OPEN_TUI_CHAT_THEME_OVERRIDES',
-  'OPENTUI_CHAT_THEME_OVERRIDES',
-] as const
 
 const mergeMarkdownOverrides = (
   base: MarkdownThemeOverrides | undefined,
@@ -525,7 +721,7 @@ const mergeTheme = (
   }
 }
 
-const parseThemeOverrides = (
+export const parseThemeOverrides = (
   raw: string,
 ): Partial<Record<ThemeName, ChatThemeOverrides>> => {
   try {
@@ -565,18 +761,6 @@ const parseThemeOverrides = (
   }
 }
 
-const loadThemeOverrides = (): Partial<
-  Record<ThemeName, ChatThemeOverrides>
-> => {
-  for (const key of CHAT_THEME_ENV_KEYS) {
-    const raw = process.env[key]
-    if (raw && raw.trim().length > 0) {
-      return parseThemeOverrides(raw)
-    }
-  }
-  return {}
-}
-
 const textDecoder = new TextDecoder()
 
 const readSpawnOutput = (output: unknown): string => {
@@ -611,7 +795,58 @@ const runSystemCommand = (command: string[]): string | null => {
   }
 }
 
-function detectPlatformTheme(): ThemeName {
+/**
+ * Detect Windows PowerShell background color theme
+ * Uses PowerShell's (Get-Host).UI.RawUI.BackgroundColor command
+ */
+function detectWindowsPowerShellTheme(): ThemeName | null {
+  if (process.platform !== 'win32') return null
+
+  const bgColor = runSystemCommand([
+    'powershell',
+    '-NoProfile',
+    '-Command',
+    '(Get-Host).UI.RawUI.BackgroundColor',
+  ])
+
+  if (!bgColor) return null
+
+  const colorLower = bgColor.toLowerCase()
+
+  // Dark background colors in PowerShell
+  const darkColors = [
+    'black',
+    'darkblue',
+    'darkgreen',
+    'darkcyan',
+    'darkred',
+    'darkmagenta',
+    'darkyellow',
+    'darkgray',
+  ]
+  // Light background colors in PowerShell
+  const lightColors = [
+    'gray',
+    'blue',
+    'green',
+    'cyan',
+    'red',
+    'magenta',
+    'yellow',
+    'white',
+  ]
+
+  if (darkColors.includes(colorLower)) return 'dark'
+  if (lightColors.includes(colorLower)) return 'light'
+
+  return null
+}
+
+export const detectTerminalOverrides = (): ThemeName | null => {
+  return null
+}
+
+export function detectPlatformTheme(): ThemeName {
   if (typeof Bun !== 'undefined') {
     if (process.platform === 'darwin') {
       const value = runSystemCommand([
@@ -625,6 +860,11 @@ function detectPlatformTheme(): ThemeName {
     }
 
     if (process.platform === 'win32') {
+      // Try PowerShell background color detection first
+      const powershellTheme = detectWindowsPowerShellTheme()
+      if (powershellTheme) return powershellTheme
+
+      // Fallback to Windows system theme
       const value = runSystemCommand([
         'powershell',
         '-NoProfile',
@@ -650,67 +890,37 @@ function detectPlatformTheme(): ThemeName {
   return 'dark'
 }
 
-export const detectSystemTheme = (): ThemeName => {
-  const envPreference = process.env.OPEN_TUI_THEME ?? process.env.OPENTUI_THEME
-  const normalizedEnv = envPreference?.toLowerCase()
-
-  if (normalizedEnv === 'dark' || normalizedEnv === 'light') {
-    return normalizedEnv
-  }
-
-  // Detect Ghostty terminal and default to dark.
-  if (
-    (typeof Bun !== 'undefined' &&
-      Bun.env.GHOSTTY_RESOURCES_DIR !== undefined) ||
-    process.env.GHOSTTY_RESOURCES_DIR !== undefined ||
-    (process.env.TERM ?? '').toLowerCase() === 'xterm-ghostty'
-  ) {
-    return 'dark'
-  }
-
-  const ideTheme = detectIDETheme()
-  const platformTheme = detectPlatformTheme()
-  const preferredTheme = ideTheme ?? platformTheme
-
-  if (normalizedEnv === 'opposite') {
-    return preferredTheme === 'dark' ? 'light' : 'dark'
-  }
-
-  return preferredTheme
-}
-
 const DEFAULT_CHAT_THEMES: Record<ThemeName, ChatTheme> = {
   dark: {
+    name: 'dark',
     // Core semantic colors
-    primary: '#facc15',
+    primary: '#9EFC62',
     secondary: '#a3aed0',
     success: '#22c55e',
     error: '#ef4444',
     warning: '#FFA500',
-    info: '#38bdf8',
+    info: '#9EFC62',
+    link: '#3B82F6',
+    directory: '#9CA3AF',
 
     // Neutral scale
     foreground: '#f1f5f9',
     background: 'transparent',
-    muted: '#9ca3af',
-    border: '#334155',
-    surface: '#000000',
+    muted: '#acb3bf',
+    border: '#536175',
+    surface: '#202327',
     surfaceHover: '#334155',
 
     // Context-specific
-    aiLine: '#34d399',
-    userLine: '#38bdf8',
+    aiLine: '#6b7280',
+    userLine: '#9EFC62',
 
     // Agent backgrounds
     agentToggleHeaderBg: '#f97316',
     agentToggleExpandedBg: '#1d4ed8',
     agentFocusedBg: '#334155',
     agentContentBg: '#000000',
-
-    // Input
-    inputBg: '#000000',
     inputFg: '#f5f5f5',
-    inputFocusedBg: '#000000',
     inputFocusedFg: '#ffffff',
 
     // Mode toggles
@@ -721,11 +931,15 @@ const DEFAULT_CHAT_THEMES: Record<ThemeName, ChatTheme> = {
     modePlanBg: '#1e40af',
     modePlanText: '#1e40af',
 
+    // Image card
+    imageCardBorder: '#6B7280',
+
     // Markdown
     markdown: {
-      codeBackground: '#1f2933',
+      // Dark mode: slightly darker gray for less brightness
+      codeBackground: '#374151',
       codeHeaderFg: '#5b647a',
-      inlineCodeFg: '#f1f5f9',
+      inlineCodeFg: '#FF8534',
       codeTextFg: '#f1f5f9',
       headingFg: {
         1: '#facc15',
@@ -739,17 +953,20 @@ const DEFAULT_CHAT_THEMES: Record<ThemeName, ChatTheme> = {
       blockquoteBorderFg: '#334155',
       blockquoteTextFg: '#e2e8f0',
       dividerFg: '#283042',
-      codeMonochrome: true,
+      codeMonochrome: false,
     },
   },
   light: {
+    name: 'light',
     // Core semantic colors
-    primary: '#f59e0b',
+    primary: '#65A83E',
     secondary: '#6b7280',
     success: '#059669',
     error: '#ef4444',
     warning: '#F59E0B',
-    info: '#3b82f6',
+    info: '#65A83E',
+    link: '#2563EB',
+    directory: '#6B7280',
 
     // Neutral scale
     foreground: '#111827',
@@ -760,19 +977,15 @@ const DEFAULT_CHAT_THEMES: Record<ThemeName, ChatTheme> = {
     surfaceHover: '#e5e7eb',
 
     // AI/User context
-    aiLine: '#059669',
-    userLine: '#3b82f6',
+    aiLine: '#6b7280',
+    userLine: '#65A83E',
 
     // Agent context
     agentToggleHeaderBg: '#ea580c',
     agentToggleExpandedBg: '#1d4ed8',
     agentFocusedBg: '#f3f4f6',
     agentContentBg: '#ffffff',
-
-    // Input
-    inputBg: '#f9fafb',
     inputFg: '#111827',
-    inputFocusedBg: '#ffffff',
     inputFocusedFg: '#000000',
 
     // Mode toggles
@@ -783,11 +996,15 @@ const DEFAULT_CHAT_THEMES: Record<ThemeName, ChatTheme> = {
     modePlanBg: '#1e40af',
     modePlanText: '#1e40af',
 
+    // Image card
+    imageCardBorder: '#6B7280',
+
     // Markdown
     markdown: {
+      // Light mode: lighter gray background so inline code feels airy
       codeBackground: '#f3f4f6',
       codeHeaderFg: '#6b7280',
-      inlineCodeFg: '#dc2626',
+      inlineCodeFg: '#C45A00',
       codeTextFg: '#111827',
       headingFg: {
         1: '#dc2626',
@@ -801,18 +1018,15 @@ const DEFAULT_CHAT_THEMES: Record<ThemeName, ChatTheme> = {
       blockquoteBorderFg: '#d1d5db',
       blockquoteTextFg: '#374151',
       dividerFg: '#e5e7eb',
-      codeMonochrome: true,
+      codeMonochrome: false,
     },
   },
 }
 
-export const chatThemes = (() => {
-  const overrides = loadThemeOverrides()
-  return {
-    dark: mergeTheme(DEFAULT_CHAT_THEMES.dark, overrides.dark),
-    light: mergeTheme(DEFAULT_CHAT_THEMES.light, overrides.light),
-  }
-})()
+export const chatThemes = {
+  dark: DEFAULT_CHAT_THEMES.dark,
+  light: DEFAULT_CHAT_THEMES.light,
+}
 
 export const createMarkdownPalette = (theme: ChatTheme): MarkdownPalette => {
   const headingDefaults: Record<MarkdownHeadingLevel, string> = {
@@ -840,6 +1054,7 @@ export const createMarkdownPalette = (theme: ChatTheme): MarkdownPalette => {
     dividerFg: theme.markdown?.dividerFg ?? theme.secondary,
     codeTextFg: theme.markdown?.codeTextFg ?? theme.foreground,
     codeMonochrome: theme.markdown?.codeMonochrome ?? true,
+    linkFg: theme.markdown?.linkFg ?? theme.link,
   }
 }
 
@@ -896,8 +1111,24 @@ export const resolveThemeColor = (
  * Watches for system theme changes and updates zustand store
  */
 
-let lastDetectedTheme: ThemeName | null = null
+// Debounce timing for file watcher events
+const FILE_WATCHER_DEBOUNCE_MS = 250
+
 let themeStoreUpdater: ((name: ThemeName) => void) | null = null
+// OSC detections happen asynchronously and at most once.
+// We cache the resolved value so synchronous theme code can read it later
+// without triggering terminal I/O.
+let oscDetectedTheme: ThemeName | null = null
+let pendingRecomputeTimer: NodeJS.Timeout | null = null
+let themeResolver: (() => ThemeName) | null = null
+
+export const getOscDetectedTheme = (): ThemeName | null => oscDetectedTheme
+export const setOscDetectedTheme = (theme: ThemeName | null): void => {
+  oscDetectedTheme = theme
+}
+export const setThemeResolver = (resolver: () => ThemeName) => {
+  themeResolver = resolver
+}
 
 /**
  * Initialize theme store updater
@@ -910,33 +1141,55 @@ export const initializeThemeWatcher = (setter: (name: ThemeName) => void) => {
 
 /**
  * Recompute system theme and update store if it changed
- * @param source - Source of the recomputation (for debugging)
  */
-const recomputeSystemTheme = (source: string) => {
+const recomputeSystemTheme = () => {
+  const env = getCliEnv()
   // Only recompute if theme is auto-detected (not explicitly set)
-  const envPreference = process.env.OPEN_TUI_THEME ?? process.env.OPENTUI_THEME
+  const envPreference = env.OPEN_TUI_THEME ?? env.OPENTUI_THEME
   if (envPreference && envPreference.toLowerCase() !== 'opposite') {
     // User explicitly set theme, don't react to system changes
     return
   }
 
-  const newTheme = detectSystemTheme()
+  if (!themeResolver) {
+    return
+  }
+
+  const newTheme = themeResolver()
 
   // Always call the updater and let it decide if an update is needed
-  lastDetectedTheme = newTheme
   if (themeStoreUpdater) {
     themeStoreUpdater(newTheme)
   }
 }
 
-// Initialize on module load
-lastDetectedTheme = detectSystemTheme()
+/**
+ * Debounced version of recomputeSystemTheme for file watcher events
+ * Prevents excessive recomputations when files change rapidly
+ */
+const debouncedRecomputeSystemTheme = () => {
+  if (pendingRecomputeTimer) {
+    clearTimeout(pendingRecomputeTimer)
+  }
+  pendingRecomputeTimer = setTimeout(() => {
+    pendingRecomputeTimer = null
+    recomputeSystemTheme()
+  }, FILE_WATCHER_DEBOUNCE_MS)
+}
+
+let lastDetectedTheme: ThemeName | null = null
+export function setLastDetectedTheme(theme: ThemeName) {
+  lastDetectedTheme = theme
+}
+export function getLastDetectedTheme(): ThemeName | null {
+  return lastDetectedTheme
+}
 
 /**
  * Setup file watchers for theme changes
  * Watches parent directories which reliably catches all file modifications
  */
-const setupFileWatchers = () => {
+export const setupFileWatchers = () => {
   const watchTargets: string[] = []
   const watchedDirs = new Set<string>()
 
@@ -948,9 +1201,16 @@ const setupFileWatchers = () => {
     )
   }
 
-  // IDE config files that we should watch
-  const ideConfigPaths = getIDEThemeConfigPaths()
-  watchTargets.push(...ideConfigPaths)
+  // IDE config files - only watch for the active IDE terminal
+  if (isVSCodeFamilyTerminal()) {
+    watchTargets.push(...resolveVSCodeSettingsPaths())
+  }
+  if (isJetBrainsTerminal()) {
+    watchTargets.push(...resolveJetBrainsLafPaths())
+  }
+  if (isZedTerminal()) {
+    watchTargets.push(...resolveZedSettingsPaths())
+  }
 
   // Watch parent directories instead of individual files
   // Directory watches are more reliable for catching all modifications including plist key deletions
@@ -970,9 +1230,7 @@ const setupFileWatchers = () => {
           (eventType, filename) => {
             // Only respond to changes affecting our target files
             if (filename && watchTargets.some((t) => t.endsWith(filename))) {
-              recomputeSystemTheme(
-                `watch:${join(parentDir, filename)}:${eventType}`,
-              )
+              debouncedRecomputeSystemTheme()
             }
           },
         )
@@ -987,12 +1245,23 @@ const setupFileWatchers = () => {
   }
 }
 
-setupFileWatchers()
-
 /**
  * SIGUSR2 signal handler for manual theme refresh
  * Users can send `kill -USR2 <pid>` to force theme recomputation
  */
-process.on('SIGUSR2', () => {
-  recomputeSystemTheme('signal:SIGUSR2')
-})
+export function enableManualThemeRefresh() {
+  process.on('SIGUSR2', () => {
+    recomputeSystemTheme()
+  })
+}
+
+/**
+ * OSC Terminal Theme Detection
+ * 
+ * OSC detection is now run synchronously at app startup in index.tsx,
+ * BEFORE OpenTUI is initialized. This avoids stdin conflicts since
+ * OpenTUI hasn't attached its listeners yet.
+ * 
+ * The detected theme is stored via setOscDetectedTheme() and retrieved
+ * via getOscDetectedTheme() when building the theme.
+ */

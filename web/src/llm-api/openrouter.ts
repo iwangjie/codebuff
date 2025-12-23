@@ -1,47 +1,77 @@
-import { setupBigQuery } from '@codebuff/bigquery'
-import { consumeCreditsAndAddAgentStep } from '@codebuff/billing'
-import { PROFIT_MARGIN } from '@codebuff/common/old-constants'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { env } from '@codebuff/internal/env'
 
-import { OpenRouterStreamChatCompletionChunkSchema } from './type/openrouter'
+import {
+  consumeCreditsForMessage,
+  extractRequestMetadata,
+  insertMessageToBigQuery,
+} from './helpers'
+import {
+  OpenRouterErrorResponseSchema,
+  OpenRouterStreamChatCompletionChunkSchema,
+} from './type/openrouter'
 
+import type { UsageData } from './helpers'
 import type { OpenRouterStreamChatCompletionChunk } from './type/openrouter'
 import type { InsertMessageBigqueryFn } from '@codebuff/common/types/contracts/bigquery'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 
 type StreamState = { responseText: string; reasoningText: string }
+function createOpenRouterRequest(params: {
+  body: any
+  openrouterApiKey: string | null
+  fetch: typeof globalThis.fetch
+}) {
+  const { body, openrouterApiKey, fetch } = params
+  return fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${openrouterApiKey ?? env.OPEN_ROUTER_API_KEY}`,
+      'HTTP-Referer': 'https://codebuff.com',
+      'X-Title': 'Codebuff',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+}
 
-function extractRequestMetadata(params: { body: unknown; logger: Logger }) {
+function extractUsageAndCost(usage: any): UsageData {
+  const openRouterCost = usage?.cost ?? 0
+  const upstreamCost = usage?.cost_details?.upstream_inference_cost ?? 0
+  return {
+    inputTokens: usage?.prompt_tokens ?? 0,
+    outputTokens: usage?.completion_tokens ?? 0,
+    cacheReadInputTokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
+    reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens ?? 0,
+    cost: openRouterCost + upstreamCost,
+  }
+}
+
+function extractRequestMetadataWithN(params: {
+  body: unknown
+  logger: Logger
+}) {
   const { body, logger } = params
-
-  const rawClientId = (body as any)?.codebuff_metadata?.client_id
-  const clientId = typeof rawClientId === 'string' ? rawClientId : null
-  if (!clientId) {
-    logger.warn({ body }, 'Received request without client_id')
-  }
-
-  const rawRunId = (body as any)?.codebuff_metadata?.run_id
-  const clientRequestId: string | null =
-    typeof rawRunId === 'string' ? rawRunId : null
-  if (!clientRequestId) {
-    logger.warn({ body }, 'Received request without run_id')
-  }
-
-  return { clientId, clientRequestId }
+  const { clientId, clientRequestId } = extractRequestMetadata({ body, logger })
+  const n = (body as any)?.codebuff_metadata?.n
+  return { clientId, clientRequestId, ...(n && { n }) }
 }
 
 export async function handleOpenRouterNonStream({
   body,
   userId,
+  stripeCustomerId,
   agentId,
+  openrouterApiKey,
   fetch,
   logger,
   insertMessageBigquery,
 }: {
   body: any
   userId: string
+  stripeCustomerId?: string | null
   agentId: string
+  openrouterApiKey: string | null
   fetch: typeof globalThis.fetch
   logger: Logger
   insertMessageBigquery: InsertMessageBigqueryFn
@@ -53,81 +83,148 @@ export async function handleOpenRouterNonStream({
   body.usage.include = true
 
   const startTime = new Date()
-  const { clientId, clientRequestId } = extractRequestMetadata({ body, logger })
+  const { clientId, clientRequestId, n } = extractRequestMetadataWithN({
+    body,
+    logger,
+  })
+  const byok = openrouterApiKey !== null
 
-  const response = await fetch(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.OPEN_ROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://codebuff.com',
-        'X-Title': 'Codebuff',
-        'Content-Type': 'application/json',
+  // If n > 1, make n parallel requests
+  if (n > 1) {
+    const requests = Array.from({ length: n }, () =>
+      createOpenRouterRequest({ body, openrouterApiKey, fetch }),
+    )
+
+    const responses = await Promise.all(requests)
+    if (responses.every((r) => !r.ok)) {
+      // Return provider-specific error from the first failed response
+      const firstFailedResponse = responses[0]
+      throw await parseOpenRouterError(firstFailedResponse)
+    }
+    const allData = await Promise.all(responses.map((r) => r.json()))
+
+    // Aggregate usage data from all responses
+    const responseContents: string[] = []
+    const aggregatedUsage: UsageData = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      reasoningTokens: 0,
+      cost: 0,
+    }
+
+    for (const data of allData) {
+      const content = data.choices?.[0]?.message?.content ?? ''
+      responseContents.push(content)
+      const usageData = extractUsageAndCost(data.usage)
+      aggregatedUsage.inputTokens += usageData.inputTokens
+      aggregatedUsage.outputTokens += usageData.outputTokens
+      aggregatedUsage.cacheReadInputTokens += usageData.cacheReadInputTokens
+      aggregatedUsage.reasoningTokens += usageData.reasoningTokens
+      aggregatedUsage.cost += usageData.cost
+    }
+
+    const responseText = JSON.stringify(responseContents)
+    const reasoningText = ''
+    const firstData = allData[0]
+
+    // Insert into BigQuery (don't await)
+    insertMessageToBigQuery({
+      messageId: firstData.id,
+      userId,
+      startTime,
+      request: body,
+      reasoningText,
+      responseText,
+      usageData: aggregatedUsage,
+      logger,
+      insertMessageBigquery,
+    }).catch((error) => {
+      logger.error({ error }, 'Failed to insert message into BigQuery')
+    })
+
+    // Consume credits
+    await consumeCreditsForMessage({
+      messageId: firstData.id,
+      userId,
+      stripeCustomerId,
+      agentId,
+      clientId,
+      clientRequestId,
+      startTime,
+      model: firstData.model,
+      reasoningText,
+      responseText,
+      usageData: aggregatedUsage,
+      byok,
+      logger,
+    })
+
+    // Return the first response with aggregated data
+    return {
+      ...firstData,
+      choices: [
+        {
+          index: 0,
+          message: { content: responseText, role: 'assistant' },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: {
+        prompt_tokens: aggregatedUsage.inputTokens,
+        completion_tokens: aggregatedUsage.outputTokens,
+        total_tokens:
+          aggregatedUsage.inputTokens + aggregatedUsage.outputTokens,
+        cost: aggregatedUsage.cost,
       },
-      body: JSON.stringify(body),
-    },
-  )
+    }
+  }
+
+  // Single request logic
+  const response = await createOpenRouterRequest({
+    body,
+    openrouterApiKey,
+    fetch,
+  })
 
   if (!response.ok) {
-    throw new Error(`OpenRouter API error: ${response.statusText}`)
+    throw await parseOpenRouterError(response)
   }
 
   const data = await response.json()
-
-  // Extract usage and content
-  const usage = data.usage
   const content = data.choices?.[0]?.message?.content ?? ''
   const reasoningText = data.choices?.[0]?.message?.reasoning ?? ''
+  const usageData = extractUsageAndCost(data.usage)
 
   // Insert into BigQuery (don't await)
-  setupBigQuery({ logger }).then(async () => {
-    const success = await insertMessageBigquery({
-      row: {
-        id: data.id,
-        user_id: userId,
-        finished_at: new Date(),
-        created_at: startTime,
-        request: body,
-        reasoning_text: reasoningText,
-        response: content,
-        output_tokens: usage?.completion_tokens ?? 0,
-        reasoning_tokens: usage?.completion_tokens_details?.reasoning_tokens,
-        cost: usage?.cost,
-        upstream_inference_cost: usage?.cost_details?.upstream_inference_cost,
-        input_tokens: usage?.prompt_tokens ?? 0,
-        cache_read_input_tokens: usage?.prompt_tokens_details?.cached_tokens,
-      },
-      logger,
-    })
-    if (!success) {
-      logger.error({ request: body }, 'Failed to insert message into BigQuery')
-    }
-  })
-
-  // Calculate costs
-  const openRouterCost = usage?.cost ?? 0
-  const upstreamCost = usage?.cost_details?.upstream_inference_cost ?? 0
-  const cost = openRouterCost + upstreamCost
-
-  // Consume credits
-  await consumeCreditsAndAddAgentStep({
+  insertMessageToBigQuery({
     messageId: data.id,
     userId,
+    startTime,
+    request: body,
+    reasoningText,
+    responseText: content,
+    usageData,
+    logger,
+    insertMessageBigquery,
+  }).catch((error) => {
+    logger.error({ error }, 'Failed to insert message into BigQuery')
+  })
+
+  // Consume credits
+  await consumeCreditsForMessage({
+    messageId: data.id,
+    userId,
+    stripeCustomerId,
     agentId,
     clientId,
     clientRequestId,
     startTime,
     model: data.model,
     reasoningText,
-    response: content,
-    cost,
-    credits: Math.round(cost * 100 * (1 + PROFIT_MARGIN)),
-    inputTokens: usage?.prompt_tokens ?? 0,
-    cacheCreationInputTokens: null,
-    cacheReadInputTokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
-    reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens ?? null,
-    outputTokens: usage?.completion_tokens ?? 0,
+    responseText: content,
+    usageData,
+    byok,
     logger,
   })
 
@@ -137,14 +234,18 @@ export async function handleOpenRouterNonStream({
 export async function handleOpenRouterStream({
   body,
   userId,
+  stripeCustomerId,
   agentId,
+  openrouterApiKey,
   fetch,
   logger,
   insertMessageBigquery,
 }: {
   body: any
   userId: string
+  stripeCustomerId?: string | null
   agentId: string
+  openrouterApiKey: string | null
   fetch: typeof globalThis.fetch
   logger: Logger
   insertMessageBigquery: InsertMessageBigqueryFn
@@ -158,22 +259,15 @@ export async function handleOpenRouterStream({
   const startTime = new Date()
   const { clientId, clientRequestId } = extractRequestMetadata({ body, logger })
 
-  const response = await fetch(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${env.OPEN_ROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://codebuff.com',
-        'X-Title': 'Codebuff',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    },
-  )
+  const byok = openrouterApiKey !== null
+  const response = await createOpenRouterRequest({
+    body,
+    openrouterApiKey,
+    fetch,
+  })
 
   if (!response.ok) {
-    throw new Error(`OpenRouter API error: ${response.statusText}`)
+    throw await parseOpenRouterError(response)
   }
 
   const reader = response.body?.getReader()
@@ -212,8 +306,11 @@ export async function handleOpenRouterStream({
       }, 30000)
 
       try {
-        while (true) {
-          const { done, value } = await reader.read()
+        let done = false
+        while (!done) {
+          const result = await reader.read()
+          done = result.done
+          const value = result.value
 
           if (done) {
             break
@@ -228,9 +325,11 @@ export async function handleOpenRouterStream({
 
             state = await handleLine({
               userId,
+              stripeCustomerId,
               agentId,
               clientId,
               clientRequestId,
+              byok,
               startTime,
               request: body,
               line,
@@ -274,6 +373,7 @@ export async function handleOpenRouterStream({
       clearInterval(heartbeatInterval)
       clientDisconnected = true
       logger.warn(
+        { clientDisconnected, state },
         'Client cancelled stream, continuing OpenRouter consumption for billing',
       )
     },
@@ -284,9 +384,11 @@ export async function handleOpenRouterStream({
 
 async function handleLine({
   userId,
+  stripeCustomerId,
   agentId,
   clientId,
   clientRequestId,
+  byok,
   startTime,
   request,
   line,
@@ -295,9 +397,11 @@ async function handleLine({
   insertMessage,
 }: {
   userId: string
+  stripeCustomerId?: string | null
   agentId: string
   clientId: string | null
   clientRequestId: string | null
+  byok: boolean
   startTime: Date
   request: unknown
   line: string
@@ -320,7 +424,8 @@ async function handleLine({
     obj = JSON.parse(raw)
   } catch (error) {
     logger.warn(
-      `Received non-JSON OpenRouter response: ${JSON.stringify(getErrorObject(error), null, 2)}`,
+      { error: getErrorObject(error, { includeRawError: true }) },
+      'Received non-JSON OpenRouter response',
     )
     return state
   }
@@ -329,16 +434,19 @@ async function handleLine({
   const parsed = OpenRouterStreamChatCompletionChunkSchema.safeParse(obj)
   if (!parsed.success) {
     logger.warn(
-      `Unable to parse OpenRotuer response: ${JSON.stringify(getErrorObject(parsed.error), null, 2)}`,
+      { error: getErrorObject(parsed.error, { includeRawError: true }) },
+      'Unable to parse OpenRouter response',
     )
     return state
   }
 
   return await handleResponse({
     userId,
+    stripeCustomerId,
     agentId,
     clientId,
     clientRequestId,
+    byok,
     startTime,
     request,
     data: parsed.data,
@@ -350,9 +458,11 @@ async function handleLine({
 
 async function handleResponse({
   userId,
+  stripeCustomerId,
   agentId,
   clientId,
   clientRequestId,
+  byok,
   startTime,
   request,
   data,
@@ -361,9 +471,11 @@ async function handleResponse({
   insertMessage,
 }: {
   userId: string
+  stripeCustomerId?: string | null
   agentId: string
   clientId: string | null
   clientRequestId: string | null
+  byok: boolean
   startTime: Date
   request: unknown
   data: OpenRouterStreamChatCompletionChunk
@@ -371,59 +483,51 @@ async function handleResponse({
   logger: Logger
   insertMessage: InsertMessageBigqueryFn
 }): Promise<StreamState> {
-  state = await handleStreamChunk({ data, state, logger })
+  const model = 'model' in data ? data.model : undefined
+  state = await handleStreamChunk({
+    data,
+    state,
+    logger,
+    userId,
+    agentId,
+    model,
+  })
 
   if ('error' in data || !data.usage) {
     // Stream not finished
     return state
   }
-  const usage = data.usage
 
-  // do not await this
-  setupBigQuery({ logger }).then(async () => {
-    const success = await insertMessage({
-      row: {
-        id: data.id,
-        user_id: userId,
-        finished_at: new Date(),
-        created_at: startTime,
-        request,
-        reasoning_text: state.reasoningText,
-        response: state.responseText,
-        output_tokens: usage.completion_tokens,
-        reasoning_tokens: usage.completion_tokens_details?.reasoning_tokens,
-        cost: usage.cost,
-        upstream_inference_cost: usage.cost_details?.upstream_inference_cost,
-        input_tokens: usage.prompt_tokens,
-        cache_read_input_tokens: usage.prompt_tokens_details?.cached_tokens,
-      },
-      logger,
-    })
-    if (!success) {
-      logger.error({ request }, 'Failed to insert message into BigQuery')
-    }
-  })
-  const openRouterCost = usage.cost ?? 0
-  const upstreamCost = usage.cost_details?.upstream_inference_cost ?? 0
-  const cost = openRouterCost + upstreamCost
+  const usageData = extractUsageAndCost(data.usage)
 
-  await consumeCreditsAndAddAgentStep({
+  // Insert into BigQuery (don't await)
+  insertMessageToBigQuery({
     messageId: data.id,
     userId,
+    startTime,
+    request,
+    reasoningText: state.reasoningText,
+    responseText: state.responseText,
+    usageData,
+    logger,
+    insertMessageBigquery: insertMessage,
+  }).catch((error) => {
+    logger.error({ error }, 'Failed to insert message into BigQuery')
+  })
+
+  await consumeCreditsForMessage({
+    messageId: data.id,
+    userId,
+    stripeCustomerId,
     agentId,
     clientId,
     clientRequestId,
     startTime,
     model: data.model,
     reasoningText: state.reasoningText,
-    response: state.responseText,
-    cost,
-    credits: Math.round(cost * 100 * (1 + PROFIT_MARGIN)),
-    inputTokens: usage.prompt_tokens,
-    cacheCreationInputTokens: null,
-    cacheReadInputTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
-    reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? null,
-    outputTokens: usage.completion_tokens,
+    responseText: state.responseText,
+    usageData,
+    byok,
     logger,
   })
 
@@ -434,21 +538,157 @@ async function handleStreamChunk({
   data,
   state,
   logger,
+  userId,
+  agentId,
+  model,
 }: {
   data: OpenRouterStreamChatCompletionChunk
   state: StreamState
   logger: Logger
+  userId: string
+  agentId: string
+  model: string | undefined
 }): Promise<StreamState> {
   if ('error' in data) {
-    logger.warn({ streamChunk: data }, 'Received error from OpenRouter')
+    // Log detailed error information for stream errors (e.g., Forbidden from Anthropic)
+    const errorData = data.error as {
+      code?: string | number | null
+      type?: string | null
+      message: string
+      param?: unknown
+      metadata?: { raw?: string; provider_name?: string }
+    }
+    logger.error(
+      {
+        userId,
+        agentId,
+        model,
+        errorCode: errorData.code,
+        errorType: errorData.type,
+        errorMessage: errorData.message,
+        errorParam: errorData.param,
+        // Provider-specific error details (e.g., from Anthropic via OpenRouter)
+        providerName: errorData.metadata?.provider_name,
+        providerRawError: errorData.metadata?.raw,
+      },
+      'Received error chunk in OpenRouter stream',
+    )
     return state
   }
 
   if (!data.choices.length) {
     logger.warn({ streamChunk: data }, 'Received empty choices from OpenRouter')
+    return state
   }
   const choice = data.choices[0]
   state.responseText += choice.delta?.content ?? ''
   state.reasoningText += choice.delta?.reasoning ?? ''
   return state
+}
+
+/**
+ * Custom error class for OpenRouter API errors that preserves provider-specific details.
+ */
+export class OpenRouterError extends Error {
+  constructor(
+    public readonly statusCode: number,
+    public readonly statusText: string,
+    public readonly errorBody: {
+      error: {
+        message: string
+        code: string | number | null
+        type?: string | null
+        param?: unknown
+        metadata?: {
+          raw?: string
+          provider_name?: string
+        }
+      }
+    },
+  ) {
+    super(errorBody.error.message)
+    this.name = 'OpenRouterError'
+  }
+
+  /**
+   * Returns the error in a format suitable for API responses.
+   */
+  toJSON() {
+    return {
+      error: {
+        message: this.errorBody.error.message,
+        code: this.errorBody.error.code,
+        type: this.errorBody.error.type,
+        param: this.errorBody.error.param,
+        metadata: this.errorBody.error.metadata,
+      },
+    }
+  }
+}
+
+/**
+ * Builds an enhanced error message that includes provider metadata when available.
+ */
+function buildEnhancedErrorMessage(
+  baseMessage: string,
+  metadata?: { raw?: string; provider_name?: string },
+): string {
+  if (!metadata?.raw) {
+    return baseMessage
+  }
+  const providerLabel = metadata.provider_name ?? 'Provider details'
+  const maxRawLength = 1000
+  const truncatedRaw =
+    metadata.raw.length > maxRawLength
+      ? metadata.raw.slice(0, maxRawLength) + '...'
+      : metadata.raw
+  return `${baseMessage} [${providerLabel}: ${truncatedRaw}]`
+}
+
+/**
+ * Parses an error response from OpenRouter and returns an OpenRouterError.
+ */
+async function parseOpenRouterError(
+  response: Response,
+): Promise<OpenRouterError> {
+  const errorText = await response.text()
+  let errorBody: OpenRouterError['errorBody']
+  try {
+    const parsed = JSON.parse(errorText)
+    const validated = OpenRouterErrorResponseSchema.safeParse(parsed)
+    if (validated.success) {
+      // metadata is not in the schema but OpenRouter includes it for provider errors
+      const metadata = (parsed as any).error?.metadata as
+        | { raw?: string; provider_name?: string }
+        | undefined
+      const enhancedMessage = buildEnhancedErrorMessage(
+        validated.data.error.message,
+        metadata,
+      )
+      errorBody = {
+        error: {
+          message: enhancedMessage,
+          code: validated.data.error.code ?? null,
+          type: validated.data.error.type,
+          param: validated.data.error.param,
+          metadata,
+        },
+      }
+    } else {
+      errorBody = {
+        error: {
+          message: errorText || response.statusText,
+          code: response.status,
+        },
+      }
+    }
+  } catch {
+    errorBody = {
+      error: {
+        message: errorText || response.statusText,
+        code: response.status,
+      },
+    }
+  }
+  return new OpenRouterError(response.status, response.statusText, errorBody)
 }

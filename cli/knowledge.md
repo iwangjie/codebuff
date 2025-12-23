@@ -1,5 +1,24 @@
 # CLI Package Knowledge
 
+## Import Guidelines
+
+**Never use dynamic `await import()` calls.** Always use static imports at the top of the file.
+
+```typescript
+// ❌ WRONG: Dynamic import
+const { someFunction } = await import('./some-module')
+
+// ✅ CORRECT: Static import at top of file
+import { someFunction } from './some-module'
+```
+
+Dynamic imports make code harder to analyze, break tree-shaking, and can hide circular dependency issues. If you need conditional loading, reconsider the architecture instead.
+
+**Exceptions** (where dynamic imports are acceptable):
+- **WASM modules**: Heavy WASM binaries that need lazy loading (e.g., QuickJS)
+- **Client-side only libraries in Next.js**: Libraries like Stripe that must only load in the browser
+- **Test utilities**: Mock module helpers that intentionally use dynamic imports
+
 ## Test Naming Conventions
 
 **IMPORTANT**: Follow these naming patterns for automatic dependency detection:
@@ -55,6 +74,17 @@ tmux new-session -d -s test-session 'cd /path/to/codebuff && bun --cwd=cli run d
 - Redirect stderr with `2>&1` to capture all output including errors
 - Add `2>/dev/null` to `tmux kill-session` to suppress errors if session doesn't exist
 - Adjust sleep timings based on what you're testing (auth checks, network requests, etc.)
+
+### Sending Input to the CLI via tmux
+
+**See [`tmux.knowledge.md`](./tmux.knowledge.md) for comprehensive tmux documentation.**
+
+**Key point:** Standard `tmux send-keys` does NOT work - you must use bracketed paste mode:
+
+```bash
+# ❌ Broken: tmux send-keys -t session "hello"
+# ✅ Works:  tmux send-keys -t session $'\e[200~hello\e[201~'
+```
 
 ## Migration from Custom OpenTUI Fork
 
@@ -360,6 +390,55 @@ The cleanest solution is to use a direct ternary with separate `<text>` elements
 
 **Note:** Helper components like `ConditionalText` are not recommended as they add unnecessary abstraction without providing meaningful benefits. The direct ternary pattern is clearer and easier to maintain.
 
+### Combining ShimmerText with Other Inline Elements
+
+**Problem**: When you need to display multiple inline elements alongside a dynamically updating component like `ShimmerText` (e.g., showing elapsed time + shimmer text), using `<box>` causes reconciliation errors.
+
+**Why `<box>` fails:**
+
+```tsx
+// ❌ PROBLEMATIC: ShimmerText in a <box> with other elements causes reconciliation errors
+<box style={{ gap: 1 }}>
+  <text fg={theme.secondary}>{elapsedSeconds}s</text>
+  <text wrap={false}>
+    <ShimmerText text="working..." />
+  </text>
+</box>
+```
+
+The issue occurs because:
+1. ShimmerText constantly updates its internal state (pulse animation)
+2. Each update re-renders with different `<span>` structures
+3. OpenTUI's reconciler struggles to match up the changing children inside the `<box>`
+4. Results in "Component of type 'span' must be created inside of a text node" error
+
+**✅ Solution: Use a Fragment with inline spans**
+
+Instead of using `<box>`, return a Fragment containing all inline elements:
+
+```tsx
+// Component returns Fragment with inline elements
+if (elapsedSeconds > 0) {
+  return (
+    <>
+      <span fg={theme.secondary}>{elapsedSeconds}s </span>
+      <ShimmerText text="working..." />
+    </>
+  )
+}
+
+// Parent wraps in <text>
+<text style={{ wrapMode: 'none' }}>{statusIndicatorNode}</text>
+```
+
+**Key principles:**
+- Avoid wrapping dynamically updating components (like ShimmerText) in `<box>` elements
+- Use Fragments to group inline elements that will be wrapped in `<text>` by the parent
+- Include spacing as part of the text content (e.g., `"{elapsedSeconds}s "` with trailing space)
+- Let the parent component provide the `<text>` wrapper for proper rendering
+
+This pattern works because all elements remain inline within a single stable `<text>` container, avoiding the reconciliation issues that occur when ShimmerText updates inside a `<box>`.
+
 ### The "Text Must Be Created Inside of a Text Node" Error
 
 **Error message:**
@@ -561,7 +640,7 @@ This prevents invalid children from reaching `TextNodeRenderable` while preservi
 
 ### Slash Commands (`/`)
 
-Typing `/` opens a five-item slash menu above the input, mirroring npm-app commands.
+Typing `/` opens a five-item slash menu above the input.
 
 **Navigation**:
 

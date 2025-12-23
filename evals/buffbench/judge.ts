@@ -1,9 +1,12 @@
 import { z } from 'zod/v4'
 
-import type { FileDiff } from './types'
-import type { AgentDefinition } from '../../sdk/src'
-import type { CodebuffClient } from '../../sdk/src/client'
+import type { EvalCommitV2 } from './types'
+import type { AgentDefinition, CodebuffClient } from '@codebuff/sdk'
 import { withTimeout } from '@codebuff/common/util/promise'
+import path from 'path'
+import fs from 'fs'
+
+const DEBUG_ERROR = true
 
 export const JudgingResultSchema = z.object({
   analysis: z
@@ -28,10 +31,8 @@ export const JudgingResultSchema = z.object({
 
 export type JudgingResult = z.infer<typeof JudgingResultSchema>
 
-const judgeAgent: AgentDefinition = {
-  id: 'judge',
+const judgeAgentBase: Omit<AgentDefinition, 'id' | 'model'> = {
   displayName: 'Judge',
-  model: 'openai/gpt-5',
   toolNames: ['set_output'],
   inputSchema: {
     prompt: { type: 'string', description: 'The evaluation prompt' },
@@ -118,10 +119,27 @@ The ground truth shows ONE valid implementation, but it's not the only correct a
 Provide detailed analysis, strengths, weaknesses, and numerical scores.`,
 }
 
+const judgeAgents: Record<string, AgentDefinition> = {
+  'judge-gpt': {
+    id: 'judge-gpt',
+    model: 'openai/gpt-5.1',
+    ...judgeAgentBase,
+  },
+  'judge-gemini': {
+    id: 'judge-gemini',
+    model: 'google/gemini-3-pro-preview',
+    ...judgeAgentBase,
+  },
+  'judge-sonnet': {
+    id: 'judge-claude',
+    model: 'anthropic/claude-sonnet-4.5',
+    ...judgeAgentBase,
+  },
+}
+
 interface JudgeCommitResultInput {
   client: CodebuffClient
-  prompt: string
-  groundTruthFileDiffs: FileDiff[]
+  commit: EvalCommitV2
   contextFiles: Record<string, string>
   agentDiff: string
   error?: string
@@ -131,27 +149,25 @@ interface JudgeCommitResultInput {
 async function runSingleJudge(
   input: JudgeCommitResultInput,
   judgePrompt: string,
-  judgeIndex: number,
+  judgeAgentId: string,
 ): Promise<JudgingResult | null> {
   const { client } = input
 
+  const judgeAgent = judgeAgents[judgeAgentId]
   const agentOutput: string[] = []
   try {
     const judgeResult = await withTimeout(
       client.run({
-        agent: 'judge',
+        agent: judgeAgent.id,
         prompt: judgePrompt,
-        agentDefinitions: [judgeAgent],
+        agentDefinitions: Object.values(judgeAgents),
         handleEvent: (event) => {
           if (event.type === 'text') {
             agentOutput.push(event.text)
           } else if (event.type === 'tool_call') {
             agentOutput.push(JSON.stringify(event, null, 2))
           } else if (event.type === 'error') {
-            console.warn(
-              `[Judge ${judgeIndex + 1}] Error event:`,
-              event.message,
-            )
+            console.warn(`[Judge ${judgeAgentId}] Error event:`, event.message)
           }
         },
       }),
@@ -161,16 +177,35 @@ async function runSingleJudge(
 
     if (judgeResult.output.type !== 'structuredOutput') {
       console.error(
-        `Judge ${judgeIndex + 1} - not structured output`,
+        `Judge ${judgeAgentId} - not structured output`,
         JSON.stringify(judgeResult.output, null, 2),
       )
-      console.error('Judge agent output trace:', agentOutput.join(''))
+      console.error(
+        'Judge agent output:',
+        JSON.stringify(judgeResult.output, null, 2),
+        'Judge agent output trace:',
+        agentOutput.join(''),
+      )
+      if (DEBUG_ERROR) {
+        fs.writeFileSync(
+          path.join(
+            __dirname,
+            '..',
+            `${input.commit.id}-${judgeAgentId}-agent-output-error.json`,
+          ),
+          JSON.stringify(
+            { output: judgeResult.output, trace: agentOutput },
+            null,
+            2,
+          ),
+        )
+      }
       return null
     }
 
     return judgeResult.output.value as JudgingResult
   } catch (error) {
-    console.warn(`Judge ${judgeIndex + 1} failed:`, error)
+    console.warn(`Judge ${judgeAgentId} failed:`, error)
     return null
   }
 }
@@ -178,16 +213,11 @@ async function runSingleJudge(
 export async function judgeCommitResult(
   input: JudgeCommitResultInput,
 ): Promise<JudgingResult> {
-  const {
-    prompt,
-    groundTruthFileDiffs,
-    contextFiles,
-    agentDiff,
-    error,
-    finalCheckOutputs,
-  } = input
+  const { commit, contextFiles, agentDiff, error, finalCheckOutputs } = input
 
-  const groundTruthDiffs = groundTruthFileDiffs
+  const { prompt, fileDiffs } = commit
+
+  const groundTruthDiffs = fileDiffs
     .map(({ path, diff }) => {
       return `### ${path}\n\`\`\`diff\n${diff}\n\`\`\``
     })
@@ -215,10 +245,11 @@ ${agentDiff || '(No changes made)'}
 ${error ? `\n## Error Encountered\n${error}` : ''}
 ${finalCheckOutputs ? `\n## Final Check Command Outputs\n${finalCheckOutputs}` : ''}`
 
-  // Run 3 judges in parallel
-  const judgePromises = Array.from({ length: 3 }, (_, index) =>
-    runSingleJudge(input, judgePrompt, index),
-  )
+  // Run 2 judges in parallel
+  const judgePromises = [
+    runSingleJudge(input, judgePrompt, 'judge-gpt'),
+    runSingleJudge(input, judgePrompt, 'judge-gemini'),
+  ]
 
   const judgeResults = await Promise.all(judgePromises)
   const validResults = judgeResults.filter(

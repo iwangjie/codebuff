@@ -1,17 +1,23 @@
 import { cloneDeep, has, isEqual } from 'lodash'
 
-import { buildArray } from './array'
-import { getToolCallString } from '../tools/utils'
-
+import type { JSONValue } from '../types/json'
 import type {
   AssistantMessage,
+  AuxiliaryMessageData,
   Message,
   SystemMessage,
   ToolMessage,
   UserMessage,
 } from '../types/messages/codebuff-message'
+import type { ToolResultOutput } from '../types/messages/content-part'
 import type { ProviderMetadata } from '../types/messages/provider-metadata'
-import type { ModelMessage } from 'ai'
+import type {
+  AssistantModelMessage,
+  ModelMessage,
+  SystemModelMessage,
+  ToolModelMessage,
+  UserModelMessage,
+} from 'ai'
 
 export function toContentString(msg: ModelMessage): string {
   const { content } = msg
@@ -27,11 +33,19 @@ export function withCacheControl<
     wrapper.providerOptions = {}
   }
 
-  for (const provider of ['anthropic', 'openrouter', 'codebuff'] as const) {
+  /* 'codebuff' provider name is not compatible with providerMetadata for
+   * messages, so we need to use 'openaiCompatible' instead.
+   * https://github.com/vercel/ai/blob/8e4fdac31b4f8c6a8d07a606a8833e74adf99470/packages/openai-compatible/src/chat/convert-to-openai-compatible-chat-messages.ts#L9
+   */
+  for (const provider of [
+    'anthropic',
+    'openrouter',
+    'openaiCompatible',
+  ] as const) {
     if (!wrapper.providerOptions[provider]) {
       wrapper.providerOptions[provider] = {}
     }
-    wrapper.providerOptions[provider].cacheControl = { type: 'ephemeral' }
+    wrapper.providerOptions[provider].cache_control = { type: 'ephemeral' }
   }
 
   return wrapper
@@ -42,15 +56,19 @@ export function withoutCacheControl<
 >(obj: T): T {
   const wrapper = cloneDeep(obj)
 
-  for (const provider of ['anthropic', 'openrouter', 'codebuff'] as const) {
-    if (has(wrapper.providerOptions?.[provider]?.cacheControl, 'type')) {
-      delete wrapper.providerOptions?.[provider]?.cacheControl?.type
+  for (const provider of [
+    'anthropic',
+    'openrouter',
+    'openaiCompatible',
+  ] as const) {
+    if (has(wrapper.providerOptions?.[provider]?.cache_control, 'type')) {
+      delete wrapper.providerOptions?.[provider]?.cache_control?.type
     }
     if (
-      Object.keys(wrapper.providerOptions?.[provider]?.cacheControl ?? {})
+      Object.keys(wrapper.providerOptions?.[provider]?.cache_control ?? {})
         .length === 0
     ) {
-      delete wrapper.providerOptions?.[provider]?.cacheControl
+      delete wrapper.providerOptions?.[provider]?.cache_control
     }
     if (Object.keys(wrapper.providerOptions?.[provider] ?? {}).length === 0) {
       delete wrapper.providerOptions?.[provider]
@@ -64,109 +82,84 @@ export function withoutCacheControl<
   return wrapper
 }
 
-type Nested<P> = Parameters<typeof buildArray<P>>[0]
-type NonStringContent<Message extends { content: any }> = Omit<
-  Message,
-  'content'
-> & {
-  content: Exclude<Message['content'], string>
+type NonStringContent<T extends { content: any }> = Omit<T, 'content'> & {
+  content: Exclude<T['content'], string>
 }
-
-function userToCodebuffMessage(
-  message: Omit<UserMessage, 'content'> & {
-    content: Exclude<UserMessage['content'], string>[number]
-  },
-): NonStringContent<UserMessage> {
-  return cloneDeep({ ...message, content: [message.content] })
-}
+type ModelMessageWithAuxiliaryData = (
+  | SystemModelMessage
+  | NonStringContent<UserModelMessage>
+  | NonStringContent<AssistantModelMessage>
+  | ToolModelMessage
+) &
+  AuxiliaryMessageData
 
 function assistantToCodebuffMessage(
   message: Omit<AssistantMessage, 'content'> & {
     content: Exclude<AssistantMessage['content'], string>[number]
   },
-): NonStringContent<AssistantMessage> {
-  if (message.content.type === 'tool-call') {
-    return cloneDeep({
-      ...message,
-      content: [
-        {
-          type: 'text',
-          text: getToolCallString(
-            message.content.toolName,
-            message.content.input,
-            false,
-          ),
-        },
-      ],
-    })
-  }
+): AssistantMessage {
+  // if (message.content.type === 'tool-call') {
+  //   return cloneDeep({
+  //     ...message,
+  //     content: [
+  //       {
+  //         type: 'text',
+  //         text: getToolCallString(
+  //           message.content.toolName,
+  //           message.content.input,
+  //           false,
+  //         ),
+  //       },
+  //     ],
+  //   })
+  // }
   return cloneDeep({ ...message, content: [message.content] })
 }
 
-function toolToCodebuffMessage(
+function convertToolResultMessage(
   message: ToolMessage,
-): Nested<NonStringContent<UserMessage> | NonStringContent<AssistantMessage>> {
-  return message.content.output.map((o) => {
-    if (o.type === 'json') {
-      const toolResult = {
-        toolName: message.content.toolName,
-        toolCallId: message.content.toolCallId,
-        output: o.value,
-      }
-      return cloneDeep({
+): ModelMessageWithAuxiliaryData[] {
+  return message.content.map((c) => {
+    if (c.type === 'json') {
+      return cloneDeep<ToolModelMessage>({
+        ...message,
+        role: 'tool',
+        content: [{ ...message, output: c, type: 'tool-result' }],
+      })
+    }
+    if (c.type === 'media') {
+      return cloneDeep<UserMessage>({
         ...message,
         role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: `<tool_result>\n${JSON.stringify(toolResult, null, 2)}\n</tool_result>`,
-          },
-        ],
-      } satisfies NonStringContent<UserMessage>)
+        content: [{ type: 'file', data: c.data, mediaType: c.mediaType }],
+      })
     }
-    if (o.type === 'media') {
-      return cloneDeep({
-        ...message,
-        role: 'user',
-        content: [{ type: 'file', data: o.data, mediaType: o.mediaType }],
-      } satisfies NonStringContent<UserMessage>)
-    }
-    o satisfies never
-    const oAny = o as any
-    throw new Error(`Invalid tool output type: ${oAny.type}`)
+    c satisfies never
+    const cAny = c as any
+    throw new Error(`Invalid tool output type: ${cAny.type}`)
   })
 }
 
-function convertToolMessages(
-  message: Message,
-): Nested<
-  | SystemMessage
-  | NonStringContent<UserMessage>
-  | NonStringContent<AssistantMessage>
-> {
+function convertToolMessage(message: Message): ModelMessageWithAuxiliaryData[] {
   if (message.role === 'system') {
-    return cloneDeep(message)
+    return [
+      {
+        ...message,
+        content: message.content.map(({ text }) => text).join('\n\n'),
+      },
+    ]
   }
   if (message.role === 'user') {
-    if (typeof message.content === 'string') {
-      return cloneDeep({
-        ...message,
-        content: [{ type: 'text' as const, text: message.content }],
-      })
-    }
-    return message.content.map((c) => {
-      return userToCodebuffMessage({
-        ...message,
-        content: c,
-      })
-    })
+    return [cloneDeep(message)]
   }
   if (message.role === 'assistant') {
     if (typeof message.content === 'string') {
-      return cloneDeep({
-        ...message,
-        content: [{ type: 'text' as const, text: message.content }],
-      })
+      return [
+        cloneDeep({
+          ...message,
+          content: [{ type: 'text' as const, text: message.content }],
+        }),
+      ]
     }
     return message.content.map((c) => {
       return assistantToCodebuffMessage({
@@ -175,12 +168,22 @@ function convertToolMessages(
       })
     })
   }
-  if (message.role !== 'tool') {
-    message satisfies never
-    const messageAny = message as any
-    throw new Error(`Invalid message role: ${messageAny.role}`)
+  if (message.role === 'tool') {
+    return convertToolResultMessage(message)
   }
-  return toolToCodebuffMessage(message)
+  message satisfies never
+  const messageAny = message as any
+  throw new Error(`Invalid message role: ${messageAny.role}`)
+}
+
+function convertToolMessages(
+  messages: Message[],
+): ModelMessageWithAuxiliaryData[] {
+  const withoutToolMessages: ModelMessageWithAuxiliaryData[] = []
+  for (const message of messages) {
+    withoutToolMessages.push(...convertToolMessage(message))
+  }
+  return withoutToolMessages
 }
 
 export function convertCbToModelMessages({
@@ -190,14 +193,11 @@ export function convertCbToModelMessages({
   messages: Message[]
   includeCacheControl?: boolean
 }): ModelMessage[] {
-  const noToolMessages: (
-    | SystemMessage
-    | NonStringContent<UserMessage>
-    | NonStringContent<AssistantMessage>
-  )[] = buildArray(messages.map((m) => convertToolMessages(m)))
+  const toolMessagesConverted: ModelMessageWithAuxiliaryData[] =
+    convertToolMessages(messages)
 
-  const aggregated: typeof noToolMessages = []
-  for (const message of noToolMessages) {
+  const aggregated: ModelMessageWithAuxiliaryData[] = []
+  for (const message of toolMessagesConverted) {
     if (aggregated.length === 0) {
       aggregated.push(message)
       continue
@@ -290,21 +290,9 @@ export function convertCbToModelMessages({
           break addCacheControlLoop
         }
 
-        if (lastContentPart.text.length < 2) {
-          // continue searching in this message
-          continue
-        }
-
         prevMessage.content = [
           ...contentBlock.slice(0, lastContentIndex),
-          {
-            ...lastContentPart,
-            text: lastContentPart.text.slice(0, 1),
-          },
-          withCacheControl({
-            ...lastContentPart,
-            text: lastContentPart.text.slice(1),
-          }),
+          withCacheControl(lastContentPart),
           ...contentBlock.slice(lastContentIndex + 1),
         ] as typeof contentBlock
 
@@ -315,4 +303,140 @@ export function convertCbToModelMessages({
   }
 
   return aggregated
+}
+
+// type NoContent<T> = T & { content?: never }
+export type SystemContent =
+  | string
+  | SystemMessage['content'][number]
+  | SystemMessage['content']
+export function systemContent(
+  content: SystemContent,
+): SystemMessage['content'] {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }]
+  }
+  if (Array.isArray(content)) {
+    return content
+  }
+  return [content]
+}
+
+export function systemMessage(
+  params:
+    | SystemContent
+    | ({
+        content: SystemContent
+      } & Omit<SystemMessage, 'role' | 'content'>),
+): SystemMessage {
+  if (typeof params === 'object' && 'content' in params) {
+    return {
+      ...params,
+      role: 'system',
+      content: systemContent(params.content),
+    }
+  }
+  return {
+    role: 'system',
+    content: systemContent(params),
+  }
+}
+
+export type UserContent =
+  | string
+  | UserMessage['content'][number]
+  | UserMessage['content']
+export function userContent(content: UserContent): UserMessage['content'] {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }]
+  }
+  if (Array.isArray(content)) {
+    return content
+  }
+  return [content]
+}
+
+export function userMessage(
+  params:
+    | UserContent
+    | ({
+        content: UserContent
+      } & Omit<UserMessage, 'role' | 'content'>),
+): UserMessage {
+  if (typeof params === 'object' && 'content' in params) {
+    return {
+      ...params,
+      role: 'user',
+      content: userContent(params.content),
+    }
+  }
+  return {
+    role: 'user',
+    content: userContent(params),
+  }
+}
+
+export type AssistantContent =
+  | string
+  | AssistantMessage['content'][number]
+  | AssistantMessage['content']
+export function assistantContent(
+  content: AssistantContent,
+): AssistantMessage['content'] {
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }]
+  }
+  if (Array.isArray(content)) {
+    return content
+  }
+  return [content]
+}
+
+export function assistantMessage(
+  params:
+    | AssistantContent
+    | ({
+        content: AssistantContent
+      } & Omit<AssistantMessage, 'role' | 'content'>),
+): AssistantMessage {
+  if (typeof params === 'object' && 'content' in params) {
+    return {
+      ...params,
+      role: 'assistant',
+      content: assistantContent(params.content),
+    }
+  }
+  return {
+    role: 'assistant',
+    content: assistantContent(params),
+  }
+}
+
+export function jsonToolResult<T extends JSONValue>(
+  value: T,
+): [
+  Extract<ToolResultOutput, { type: 'json' }> & {
+    value: T
+  },
+] {
+  return [
+    {
+      type: 'json',
+      value,
+    },
+  ]
+}
+
+export function mediaToolResult(params: {
+  data: string
+  mediaType: string
+}): [Extract<ToolResultOutput, { type: 'media' }>] {
+  const { data, mediaType } = params
+  return [
+    {
+      type: 'media',
+      data,
+      mediaType,
+    },
+  ]
 }

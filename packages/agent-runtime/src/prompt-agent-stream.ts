@@ -12,55 +12,52 @@ import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ParamsOf } from '@codebuff/common/types/function-params'
 import type { Message } from '@codebuff/common/types/messages/codebuff-message'
 import type { OpenRouterProviderOptions } from '@codebuff/internal/openrouter-ai-sdk'
+import type { ToolSet } from 'ai'
 
 export const getAgentStreamFromTemplate = (params: {
+  agentId?: string
   apiKey: string
-  runId: string
   clientSessionId: string
   fingerprintId: string
-  userInputId: string
-  userId: string | undefined
-  onCostCalculated?: (credits: number) => Promise<void>
-  agentId?: string
   includeCacheControl?: boolean
-  textOverride: string | null
-
-  template: AgentTemplate
-  logger: Logger
-  sendAction: SendActionFn
-  promptAiSdkStream: PromptAiSdkStreamFn
   liveUserInputRecord: UserInputRecord
+  localAgentTemplates: Record<string, AgentTemplate>
+  logger: Logger
+  messages: Message[]
+  runId: string
   sessionConnections: SessionRecord
+  template: AgentTemplate
+  tools: ToolSet
+  userId: string | undefined
+  userInputId: string
+
+  onCostCalculated?: (credits: number) => Promise<void>
+  promptAiSdkStream: PromptAiSdkStreamFn
+  sendAction: SendActionFn
   trackEvent: TrackEventFn
-}): { getStream: (messages: Message[]) => ReturnType<PromptAiSdkStreamFn> } => {
+}): ReturnType<PromptAiSdkStreamFn> => {
   const {
+    agentId,
     apiKey,
-    runId,
     clientSessionId,
     fingerprintId,
-    userInputId,
-    userId,
-    onCostCalculated,
-    agentId,
     includeCacheControl,
-    textOverride,
-    template,
-    logger,
-    sendAction,
-    promptAiSdkStream,
     liveUserInputRecord,
+    localAgentTemplates,
+    logger,
+    messages,
+    runId,
     sessionConnections,
+    template,
+    tools,
+    userId,
+    userInputId,
+
+    sendAction,
+    onCostCalculated,
+    promptAiSdkStream,
     trackEvent,
   } = params
-
-  if (textOverride !== null) {
-    return {
-      getStream: async function* stream(): ReturnType<PromptAiSdkStreamFn> {
-        yield { type: 'text', text: textOverride!, agentId }
-        return crypto.randomUUID()
-      },
-    }
-  }
 
   if (!template) {
     throw new Error('Agent template is null/undefined')
@@ -68,46 +65,46 @@ export const getAgentStreamFromTemplate = (params: {
 
   const { model } = template
 
-  const getStream = (messages: Message[]): ReturnType<PromptAiSdkStreamFn> => {
-    const aiSdkStreamParams: ParamsOf<PromptAiSdkStreamFn> = {
-      apiKey,
-      runId,
-      messages,
-      model,
-      stopSequences: [globalStopSequence],
-      clientSessionId,
-      fingerprintId,
-      userInputId,
-      userId,
-      maxOutputTokens: 32_000,
-      onCostCalculated,
-      includeCacheControl,
-      agentId,
-      maxRetries: 3,
-      sendAction,
-      liveUserInputRecord,
-      sessionConnections,
-      logger,
-      trackEvent,
-    }
+  const aiSdkStreamParams: ParamsOf<PromptAiSdkStreamFn> = {
+    agentId,
+    apiKey,
+    clientSessionId,
+    fingerprintId,
+    includeCacheControl,
+    logger,
+    liveUserInputRecord,
+    localAgentTemplates,
+    maxOutputTokens: 32_000,
+    maxRetries: 3,
+    messages,
+    model,
+    runId,
+    sessionConnections,
+    spawnableAgents: template.spawnableAgents,
+    stopSequences: [globalStopSequence],
+    tools,
+    userId,
+    userInputId,
 
-    // Add Gemini-specific options if needed
-    const primaryModel = Array.isArray(model) ? model[0] : model
-
-    if (!aiSdkStreamParams.providerOptions) {
-      aiSdkStreamParams.providerOptions = {}
-    }
-    for (const provider of ['openrouter', 'codebuff'] as const) {
-      if (!aiSdkStreamParams.providerOptions[provider]) {
-        aiSdkStreamParams.providerOptions[provider] = {}
-      }
-      ;(
-        aiSdkStreamParams.providerOptions[provider] as OpenRouterProviderOptions
-      ).reasoning = template.reasoningOptions
-    }
-
-    return promptAiSdkStream(aiSdkStreamParams)
+    onCostCalculated,
+    sendAction,
+    trackEvent,
   }
 
-  return { getStream }
+  if (!aiSdkStreamParams.providerOptions) {
+    aiSdkStreamParams.providerOptions = {}
+  }
+  for (const provider of ['openrouter', 'codebuff'] as const) {
+    if (!aiSdkStreamParams.providerOptions[provider]) {
+      aiSdkStreamParams.providerOptions[provider] = {}
+    }
+    ;(
+      aiSdkStreamParams.providerOptions[provider] as OpenRouterProviderOptions
+    ).reasoning = template.reasoningOptions
+  }
+
+  // Pass agent's provider routing options to SDK
+  aiSdkStreamParams.agentProviderOptions = template.providerOptions
+
+  return promptAiSdkStream(aiSdkStreamParams)
 }

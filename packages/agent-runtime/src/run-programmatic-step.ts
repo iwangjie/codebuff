@@ -1,10 +1,18 @@
-import { getToolCallString } from '@codebuff/common/tools/utils'
 import { getErrorObject } from '@codebuff/common/util/error'
+import { assistantMessage } from '@codebuff/common/util/messages'
 import { cloneDeep } from 'lodash'
 
+import { clearProposedContentForRun } from './tools/handlers/tool/proposed-content-store'
 import { executeToolCall } from './tools/tool-executor'
+import { parseTextWithToolCalls } from './util/parse-tool-calls-from-text'
 
+import type { ParsedSegment } from './util/parse-tool-calls-from-text'
+
+import type { FileProcessingState } from './tools/handlers/tool/write-file'
+import type { ExecuteToolCallParams } from './tools/tool-executor'
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
+import { HandleStepsYieldValueSchema } from '@codebuff/common/types/agent-template'
+
 import type {
   AgentTemplate,
   StepGenerator,
@@ -17,13 +25,13 @@ import type {
 import type { AddAgentStepFn } from '@codebuff/common/types/contracts/database'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ParamsExcluding } from '@codebuff/common/types/function-params'
+import type { ToolMessage } from '@codebuff/common/types/messages/codebuff-message'
 import type {
+  ToolCallPart,
   ToolResultOutput,
-  ToolResultPart,
 } from '@codebuff/common/types/messages/content-part'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type { AgentState } from '@codebuff/common/types/session-state'
-
 // Maintains generator state for all agents. Generator state can't be serialized, so we store it in memory.
 const runIdToGenerator: Record<string, StepGenerator | undefined> = {}
 export const runIdToStepAll: Set<string> = new Set()
@@ -31,6 +39,7 @@ export const runIdToStepAll: Set<string> = new Set()
 // Function to clear the generator cache for testing purposes
 export function clearAgentGeneratorCache(params: { logger: Logger }) {
   for (const key in runIdToGenerator) {
+    clearProposedContentForRun(key)
     delete runIdToGenerator[key]
   }
   runIdToStepAll.clear()
@@ -39,38 +48,42 @@ export function clearAgentGeneratorCache(params: { logger: Logger }) {
 // Function to handle programmatic agents
 export async function runProgrammaticStep(
   params: {
+    addAgentStep: AddAgentStepFn
     agentState: AgentState
-    template: AgentTemplate
+    clientSessionId: string
+    fingerprintId: string
+    handleStepsLogChunk: HandleStepsLogChunkFn
+    localAgentTemplates: Record<string, AgentTemplate>
+    logger: Logger
+    nResponses?: string[]
+    onResponseChunk: (chunk: string | PrintModeEvent) => void
     prompt: string | undefined
-    toolCallParams: Record<string, any> | undefined
-    system: string | undefined
-    userId: string | undefined
     repoId: string | undefined
     repoUrl: string | undefined
-    userInputId: string
-    fingerprintId: string
-    onResponseChunk: (chunk: string | PrintModeEvent) => void
-    localAgentTemplates: Record<string, AgentTemplate>
-    stepsComplete: boolean
     stepNumber: number
-    handleStepsLogChunk: HandleStepsLogChunkFn
+    stepsComplete: boolean
+    template: AgentTemplate
+    toolCallParams: Record<string, any> | undefined
     sendAction: SendActionFn
-    addAgentStep: AddAgentStepFn
-    logger: Logger
-  } & ParamsExcluding<
-    typeof executeToolCall,
+    system: string | undefined
+    userId: string | undefined
+    userInputId: string
+  } & Omit<
+    ExecuteToolCallParams,
     | 'toolName'
     | 'input'
-    | 'toolCalls'
-    | 'toolResults'
-    | 'toolResultsToAddAfterStream'
-    | 'previousToolCallFinished'
+    | 'autoInsertEndStepParam'
+    | 'excludeToolFromMessageHistory'
+    | 'agentContext'
     | 'agentStepId'
     | 'agentTemplate'
     | 'fullResponse'
-    | 'autoInsertEndStepParam'
-    | 'state'
-    | 'excludeToolFromMessageHistory'
+    | 'previousToolCallFinished'
+    | 'fileProcessingState'
+    | 'toolCallId'
+    | 'toolCalls'
+    | 'toolResults'
+    | 'toolResultsToAddAfterStream'
   > &
     ParamsExcluding<
       AddAgentStepFn,
@@ -84,15 +97,17 @@ export async function runProgrammaticStep(
     >,
 ): Promise<{
   agentState: AgentState
-  textOverride: string | null
   endTurn: boolean
   stepNumber: number
+  generateN?: number
 }> {
   const {
     agentState,
     template,
+    clientSessionId,
     prompt,
     toolCallParams,
+    nResponses,
     system,
     userId,
     userInputId,
@@ -162,7 +177,7 @@ export async function runProgrammaticStep(
       // Clear the STEP_ALL mode. Stepping can continue if handleSteps doesn't return.
       runIdToStepAll.delete(agentState.runId)
     } else {
-      return { agentState, textOverride: null, endTurn: false, stepNumber }
+      return { agentState, endTurn: false, stepNumber }
     }
   }
 
@@ -170,39 +185,34 @@ export async function runProgrammaticStep(
 
   // Initialize state for tool execution
   const toolCalls: CodebuffToolCall[] = []
-  const toolResults: ToolResultPart[] = []
-  const state = {
-    fingerprintId,
-    userId,
-    agentTemplate: template,
-    localAgentTemplates,
-    system,
-    sendSubagentChunk: (data: {
-      userInputId: string
-      agentId: string
-      agentType: string
-      chunk: string
-      prompt?: string
-      forwardToPrompt?: boolean
-    }) => {
-      sendAction({
-        action: {
-          type: 'subagent-response-chunk',
-          ...data,
-        },
-      })
-    },
-    agentState: cloneDeep({
-      ...agentState,
-      runId: agentState.runId!, // We've already verified runId exists above
-    }),
-    agentContext: cloneDeep(agentState.agentContext),
-    messages: cloneDeep(agentState.messageHistory),
+  const toolResults: ToolMessage[] = []
+  const fileProcessingState: FileProcessingState = {
+    promisesByPath: {},
+    allPromises: [],
+    fileChangeErrors: [],
+    fileChanges: [],
+    firstFileProcessed: false,
+  }
+  const agentContext = cloneDeep(agentState.agentContext)
+  const sendSubagentChunk = (data: {
+    userInputId: string
+    agentId: string
+    agentType: string
+    chunk: string
+    prompt?: string
+    forwardToPrompt?: boolean
+  }) => {
+    sendAction({
+      action: {
+        type: 'subagent-response-chunk',
+        ...data,
+      },
+    })
   }
 
-  let toolResult: ToolResultOutput[] = []
+  let toolResult: ToolResultOutput[] | undefined = undefined
   let endTurn = false
-  let textOverride: string | null = null
+  let generateN: number | undefined = undefined
 
   let startTime = new Date()
   let creditsBefore = agentState.directCreditsUsed
@@ -212,156 +222,95 @@ export async function runProgrammaticStep(
     // Execute tools synchronously as the generator yields them
     do {
       startTime = new Date()
-      creditsBefore = state.agentState.directCreditsUsed
-      childrenBefore = state.agentState.childRunIds.length
+      creditsBefore = agentState.directCreditsUsed
+      childrenBefore = agentState.childRunIds.length
 
       const result = generator!.next({
-        agentState: getPublicAgentState(state.agentState),
-        toolResult,
+        agentState: getPublicAgentState(
+          agentState as AgentState & Required<Pick<AgentState, 'runId'>>,
+        ),
+        toolResult: toolResult ?? [],
         stepsComplete,
+        nResponses,
       })
 
       if (result.done) {
         endTurn = true
         break
       }
+
+      // Validate the yield value from handleSteps
+      const parseResult = HandleStepsYieldValueSchema.safeParse(result.value)
+      if (!parseResult.success) {
+        throw new Error(
+          `Invalid yield value from handleSteps in agent ${template.id}: ${parseResult.error.message}. ` +
+            `Received: ${JSON.stringify(result.value)}`,
+        )
+      }
+
       if (result.value === 'STEP') {
         break
       }
       if (result.value === 'STEP_ALL') {
-        runIdToStepAll.add(state.agentState.runId)
+        runIdToStepAll.add(agentState.runId)
         break
       }
 
       if ('type' in result.value && result.value.type === 'STEP_TEXT') {
-        textOverride = result.value.text
+        // Parse text and tool calls, preserving interleaved order
+        const segments = parseTextWithToolCalls(result.value.text)
+
+        if (segments.length > 0) {
+          // Execute segments (text and tool calls) in order
+          toolResult = await executeSegmentsArray(segments, {
+            ...params,
+            agentContext,
+            agentStepId,
+            agentTemplate: template,
+            agentState,
+            fileProcessingState,
+            fullResponse: '',
+            previousToolCallFinished: Promise.resolve(),
+            toolCalls,
+            toolResults,
+            onResponseChunk,
+          })
+        }
+        continue
+      }
+
+      if ('type' in result.value && result.value.type === 'GENERATE_N') {
+        logger.info({ resultValue: result.value }, 'GENERATE_N yielded')
+        // Handle GENERATE_N: generate n responses using the LLM
+        generateN = result.value.n
+        endTurn = false
         break
       }
 
       // Process tool calls yielded by the generator
-      const toolCallWithoutId = result.value
-      const toolCall = {
-        ...toolCallWithoutId,
-        toolCallId: crypto.randomUUID(),
-      } as CodebuffToolCall & {
-        includeToolCall?: boolean
-      }
+      const toolCall = result.value as ToolCallToExecute
 
-      // Note: We don't check if the tool is available for the agent template anymore.
-      // You can run any tool from handleSteps now!
-      // if (!template.toolNames.includes(toolCall.toolName)) {
-      //   throw new Error(
-      //     `Tool ${toolCall.toolName} is not available for agent ${template.id}. Available tools: ${template.toolNames.join(', ')}`,
-      //   )
-      // }
-
-      const excludeToolFromMessageHistory = toolCall?.includeToolCall === false
-      // Add assistant message with the tool call before executing it
-      if (!excludeToolFromMessageHistory) {
-        const toolCallString = getToolCallString(
-          toolCall.toolName,
-          toolCall.input,
-        )
-        onResponseChunk(toolCallString)
-        state.messages.push({
-          role: 'assistant' as const,
-          content: toolCallString,
-        })
-        // Optional call handles both top-level and nested agents
-        state.sendSubagentChunk?.({
-          userInputId,
-          agentId: state.agentState.agentId,
-          agentType: state.agentState.agentType!,
-          chunk: toolCallString,
-          forwardToPrompt: !state.agentState.parentId,
-        })
-      }
-
-      // Execute the tool synchronously and get the result immediately
-      // Wrap onResponseChunk to add parentAgentId to nested agent events
-      await executeToolCall({
+      toolResult = await executeSingleToolCall(toolCall, {
         ...params,
-        toolName: toolCall.toolName,
-        input: toolCall.input,
+        agentContext,
+        agentStepId,
+        agentTemplate: template,
+        agentState,
+        fileProcessingState,
+        fullResponse: '',
+        previousToolCallFinished: Promise.resolve(),
         toolCalls,
         toolResults,
-        toolResultsToAddAfterStream: [],
-        previousToolCallFinished: Promise.resolve(),
-        agentTemplate: template,
-        agentStepId,
-        fullResponse: '',
-        state,
-        autoInsertEndStepParam: true,
-        excludeToolFromMessageHistory,
-        fromHandleSteps: true,
-        onResponseChunk: (chunk: string | PrintModeEvent) => {
-          if (typeof chunk === 'string') {
-            onResponseChunk(chunk)
-            return
-          }
-
-          // Only add parentAgentId if this programmatic agent has a parent (i.e., it's nested)
-          // This ensures we don't add parentAgentId to top-level spawns
-          if (state.agentState.parentId) {
-            const parentAgentId = state.agentState.agentId
-
-            switch (chunk.type) {
-              case 'subagent_start':
-              case 'subagent_finish':
-                if (!chunk.parentAgentId) {
-                  onResponseChunk({
-                    ...chunk,
-                    parentAgentId,
-                  })
-                  return
-                }
-                break
-              case 'tool_call':
-              case 'tool_result': {
-                if (!chunk.parentAgentId) {
-                  const debugPayload =
-                    chunk.type === 'tool_call'
-                      ? {
-                          eventType: chunk.type,
-                          agentId: chunk.agentId,
-                          parentId: parentAgentId,
-                        }
-                      : {
-                          eventType: chunk.type,
-                          parentId: parentAgentId,
-                        }
-                  onResponseChunk({
-                    ...chunk,
-                    parentAgentId,
-                  })
-                  return
-                }
-                break
-              }
-              default:
-                break
-            }
-          }
-
-          // For other events or top-level spawns, send as-is
-          onResponseChunk(chunk)
-        },
+        onResponseChunk,
       })
 
-      // TODO: Remove messages from state and always use agentState.messageHistory.
-      // Sync state.messages back to agentState.messageHistory
-      state.agentState.messageHistory = state.messages
-
-      // Get the latest tool result
-      toolResult = toolResults[toolResults.length - 1]?.output
-
-      if (state.agentState.runId) {
+      if (agentState.runId) {
         await addAgentStep({
           ...params,
-          agentRunId: state.agentState.runId,
+          agentRunId: agentState.runId,
           stepNumber,
-          credits: state.agentState.directCreditsUsed - creditsBefore,
-          childRunIds: state.agentState.childRunIds.slice(childrenBefore),
+          credits: agentState.directCreditsUsed - creditsBefore,
+          childRunIds: agentState.childRunIds.slice(childrenBefore),
           status: 'completed',
           startTime,
           messageId: null,
@@ -378,10 +327,10 @@ export async function runProgrammaticStep(
     } while (true)
 
     return {
-      agentState: state.agentState,
-      textOverride: textOverride,
+      agentState,
       endTurn,
       stepNumber,
+      generateN,
     }
   } catch (error) {
     endTurn = true
@@ -396,15 +345,9 @@ export async function runProgrammaticStep(
 
     onResponseChunk(errorMessage)
 
-    state.agentState.messageHistory = [
-      ...state.messages,
-      {
-        role: 'assistant' as const,
-        content: errorMessage,
-      },
-    ]
-    state.agentState.output = {
-      ...state.agentState.output,
+    agentState.messageHistory.push(assistantMessage(errorMessage))
+    agentState.output = {
+      ...agentState.output,
       error: errorMessage,
     }
 
@@ -427,15 +370,16 @@ export async function runProgrammaticStep(
     stepNumber++
 
     return {
-      agentState: state.agentState,
-      textOverride: null,
+      agentState,
       endTurn,
       stepNumber,
+      generateN: undefined,
     }
   } finally {
     if (endTurn) {
       delete runIdToGenerator[agentState.runId]
       runIdToStepAll.delete(agentState.runId)
+      clearProposedContentForRun(agentState.runId)
     }
   }
 }
@@ -443,12 +387,189 @@ export async function runProgrammaticStep(
 export const getPublicAgentState = (
   agentState: AgentState & Required<Pick<AgentState, 'runId'>>,
 ): PublicAgentState => {
-  const { agentId, runId, parentId, messageHistory, output } = agentState
+  const {
+    agentId,
+    runId,
+    parentId,
+    messageHistory,
+    output,
+    systemPrompt,
+    toolDefinitions,
+  } = agentState
   return {
     agentId,
     runId,
     parentId,
     messageHistory: messageHistory as any as PublicAgentState['messageHistory'],
     output,
+    systemPrompt,
+    toolDefinitions,
   }
+}
+
+/**
+ * Represents a tool call to be executed.
+ * Can optionally include `includeToolCall: false` to exclude from message history.
+ */
+type ToolCallToExecute = {
+  toolName: string
+  input: Record<string, unknown>
+  includeToolCall?: boolean
+}
+
+/**
+ * Parameters for executing an array of tool calls.
+ */
+type ExecuteToolCallsArrayParams = Omit<
+  ExecuteToolCallParams,
+  | 'toolName'
+  | 'input'
+  | 'autoInsertEndStepParam'
+  | 'excludeToolFromMessageHistory'
+  | 'toolCallId'
+  | 'toolResultsToAddAfterStream'
+> & {
+  agentState: AgentState
+  onResponseChunk: (chunk: string | PrintModeEvent) => void
+}
+
+/**
+ * Executes a single tool call.
+ * Adds the tool call as an assistant message and then executes it.
+ *
+ * @returns The tool result from the executed tool call.
+ */
+async function executeSingleToolCall(
+  toolCallToExecute: ToolCallToExecute,
+  params: ExecuteToolCallsArrayParams,
+): Promise<ToolResultOutput[] | undefined> {
+  const { agentState, onResponseChunk, toolResults } = params
+
+  // Note: We don't check if the tool is available for the agent template anymore.
+  // You can run any tool from handleSteps now!
+  // if (!template.toolNames.includes(toolCall.toolName)) {
+  //   throw new Error(
+  //     `Tool ${toolCall.toolName} is not available for agent ${template.id}. Available tools: ${template.toolNames.join(', ')}`,
+  //   )
+  // }
+
+  const toolCallId = crypto.randomUUID()
+  const excludeToolFromMessageHistory =
+    toolCallToExecute.includeToolCall === false
+
+  // Add assistant message with the tool call before executing it
+  if (!excludeToolFromMessageHistory) {
+    const toolCallPart: ToolCallPart = {
+      type: 'tool-call',
+      toolCallId,
+      toolName: toolCallToExecute.toolName,
+      input: toolCallToExecute.input,
+    }
+    // onResponseChunk({
+    //   ...toolCallPart,
+    //   type: 'tool_call',
+    //   agentId: agentState.agentId,
+    //   parentAgentId: agentState.parentId,
+    // })
+    // NOTE(James): agentState.messageHistory is readonly for some reason (?!). Recreating the array is a workaround.
+    agentState.messageHistory = [...agentState.messageHistory]
+    agentState.messageHistory.push(assistantMessage(toolCallPart))
+    // Optional call handles both top-level and nested agents
+    // sendSubagentChunk({
+    //   userInputId,
+    //   agentId: agentState.agentId,
+    //   agentType: agentState.agentType!,
+    //   chunk: toolCallString,
+    //   forwardToPrompt: !agentState.parentId,
+    // })
+  }
+
+  // Execute the tool call
+  await executeToolCall({
+    ...params,
+    toolName: toolCallToExecute.toolName as any,
+    input: toolCallToExecute.input,
+    autoInsertEndStepParam: true,
+    excludeToolFromMessageHistory,
+    fromHandleSteps: true,
+    toolCallId,
+    toolResultsToAddAfterStream: [],
+
+    onResponseChunk: (chunk: string | PrintModeEvent) => {
+      if (typeof chunk === 'string') {
+        onResponseChunk(chunk)
+        return
+      }
+
+      // Only add parentAgentId if this programmatic agent has a parent (i.e., it's nested)
+      // This ensures we don't add parentAgentId to top-level spawns
+      if (agentState.parentId) {
+        const parentAgentId = agentState.agentId
+
+        switch (chunk.type) {
+          case 'subagent_start':
+          case 'subagent_finish':
+            if (!chunk.parentAgentId) {
+              onResponseChunk({
+                ...chunk,
+                parentAgentId,
+              })
+              return
+            }
+            break
+          case 'tool_call':
+          case 'tool_result': {
+            if (!chunk.parentAgentId) {
+              onResponseChunk({
+                ...chunk,
+                parentAgentId,
+              })
+              return
+            }
+            break
+          }
+          default:
+            break
+        }
+      }
+
+      // For other events or top-level spawns, send as-is
+      onResponseChunk(chunk)
+    },
+  })
+
+  // Get the latest tool result
+  return toolResults[toolResults.length - 1]?.content
+}
+
+/**
+ * Executes an array of segments (text and tool calls) sequentially.
+ * Text segments are added as assistant messages.
+ * Tool calls are added as assistant messages and then executed.
+ *
+ * @returns The tool result from the last executed tool call.
+ */
+async function executeSegmentsArray(
+  segments: ParsedSegment[],
+  params: ExecuteToolCallsArrayParams,
+): Promise<ToolResultOutput[] | undefined> {
+  const { agentState } = params
+
+  let toolResults: ToolResultOutput[] = []
+
+  for (const segment of segments) {
+    if (segment.type === 'text') {
+      // Add text as an assistant message
+      agentState.messageHistory = [...agentState.messageHistory]
+      agentState.messageHistory.push(assistantMessage(segment.text))
+    } else {
+      // Handle tool call segment
+      const toolResult = await executeSingleToolCall(segment, params)
+      if (toolResult) {
+        toolResults.push(...toolResult)
+      }
+    }
+  }
+
+  return toolResults
 }

@@ -1,5 +1,5 @@
 import type { ToolResultOutput } from '../types/messages/content-part'
-import type z from 'zod/v4'
+import type { Tool } from 'ai'
 
 export const toolNameParam = 'cb_tool_name'
 export const endsAgentStepParam = 'cb_easp'
@@ -14,6 +14,7 @@ export const TOOLS_WHICH_WONT_FORCE_NEXT_STEP = [
   'add_message',
   'update_subgoal',
   'create_plan',
+  'suggest_followups',
   'task_completed',
 ]
 
@@ -21,6 +22,7 @@ export const TOOLS_WHICH_WONT_FORCE_NEXT_STEP = [
 export const toolNames = [
   'add_subgoal',
   'add_message',
+  'ask_user',
   'browser_logs',
   'code_search',
   'create_plan',
@@ -29,6 +31,8 @@ export const toolNames = [
   'glob',
   'list_directory',
   'lookup_agent_info',
+  'propose_str_replace',
+  'propose_write_file',
   'read_docs',
   'read_files',
   'read_subtree',
@@ -39,6 +43,7 @@ export const toolNames = [
   'spawn_agents',
   'spawn_agent_inline',
   'str_replace',
+  'suggest_followups',
   'task_completed',
   'think_deeply',
   'update_subgoal',
@@ -49,12 +54,15 @@ export const toolNames = [
 
 export const publishedTools = [
   'add_message',
+  'ask_user',
   'code_search',
   'end_turn',
   'find_files',
   'glob',
   'list_directory',
   'lookup_agent_info',
+  'propose_str_replace',
+  'propose_write_file',
   'read_docs',
   'read_files',
   'read_subtree',
@@ -64,6 +72,7 @@ export const publishedTools = [
   'set_output',
   'spawn_agents',
   'str_replace',
+  'suggest_followups',
   'task_completed',
   'think_deeply',
   'web_search',
@@ -75,14 +84,13 @@ export const publishedTools = [
 export type ToolName = (typeof toolNames)[number]
 export type PublishedToolName = (typeof publishedTools)[number]
 
-export type $ToolParams<T extends ToolName = ToolName> = {
+/** Only used for validating tool definitions */
+export type $ToolParams<T extends ToolName = ToolName> = Required<
+  Pick<
+    Tool<any, ToolResultOutput[]>,
+    'description' | 'inputSchema' | 'outputSchema'
+  >
+> & {
   toolName: T
   endsAgentStep: boolean
-  parameters: z.ZodType
-  outputs: z.ZodType<ToolResultOutput[]>
-}
-
-export type $ToolResults = {
-  toolName: string
-  outputs: $ToolParams['outputs']
 }

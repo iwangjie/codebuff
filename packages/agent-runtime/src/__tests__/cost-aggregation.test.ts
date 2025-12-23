@@ -3,6 +3,7 @@ import {
   getInitialAgentState,
   getInitialSessionState,
 } from '@codebuff/common/types/session-state'
+import { assistantMessage } from '@codebuff/common/util/messages'
 import {
   spyOn,
   beforeEach,
@@ -17,6 +18,7 @@ import * as agentRegistry from '../templates/agent-registry'
 import * as spawnAgentUtils from '../tools/handlers/tool/spawn-agent-utils'
 import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { AgentState } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 
@@ -46,16 +48,13 @@ const mockFileContext: ProjectFileContext = {
   },
 }
 
-class MockWebSocket {
-  send(msg: string) {}
-  close() {}
-  on(event: string, listener: (...args: any[]) => void) {}
-  removeListener(event: string, listener: (...args: any[]) => void) {}
-}
-
 describe('Cost Aggregation System', () => {
   let mockAgentTemplate: any
   let mockLocalAgentTemplates: Record<string, any>
+  let params: ParamsExcluding<
+    typeof handleSpawnAgents,
+    'agentState' | 'toolCall'
+  >
 
   beforeEach(() => {
     // Setup mock agent template
@@ -76,6 +75,25 @@ describe('Cost Aggregation System', () => {
 
     mockLocalAgentTemplates = {
       'test-agent': mockAgentTemplate,
+    }
+
+    params = {
+      ...TEST_AGENT_RUNTIME_IMPL,
+      agentTemplate: mockAgentTemplate,
+      ancestorRunIds: [],
+      clientSessionId: 'test-session',
+      fileContext: mockFileContext,
+      fingerprintId: 'test-fingerprint',
+      localAgentTemplates: mockLocalAgentTemplates,
+      previousToolCallFinished: Promise.resolve(),
+      repoId: undefined,
+      repoUrl: undefined,
+      signal: new AbortController().signal,
+      system: 'Test system prompt',
+      tools: {},
+      userId: 'test-user',
+      userInputId: 'test-input',
+      writeToClient: () => {},
     }
 
     // Mock getAgentTemplate to return our mock template
@@ -130,17 +148,8 @@ describe('Cost Aggregation System', () => {
         stepsRemaining: 10,
         creditsUsed: 50, // Parent starts with some cost
         directCreditsUsed: 50,
-      }
-
-      const mockValidatedState = {
-        fingerprintId: 'test-fingerprint',
-        userId: 'test-user',
-        agentTemplate: mockAgentTemplate,
-        localAgentTemplates: mockLocalAgentTemplates,
-        messages: [],
-        agentState: parentAgentState,
-        sendSubagentChunk: () => {},
-        system: 'Test system prompt',
+        systemPrompt: 'Test system prompt',
+        toolDefinitions: {},
       }
 
       // Mock executeAgent to return results with different credit costs
@@ -153,7 +162,7 @@ describe('Cost Aggregation System', () => {
             stepsRemaining: 10,
             creditsUsed: 75, // First subagent uses 75 credits
           },
-          output: { type: 'lastMessage', value: 'Sub-agent 1 response' },
+          output: { type: 'lastMessage', value: [assistantMessage('Sub-agent 1 response')] },
         })
         .mockResolvedValueOnce({
           agentState: {
@@ -163,7 +172,7 @@ describe('Cost Aggregation System', () => {
             stepsRemaining: 10,
             creditsUsed: 100, // Second subagent uses 100 credits
           },
-          output: { type: 'lastMessage', value: 'Sub-agent 2 response' },
+          output: { type: 'lastMessage', value: [assistantMessage('Sub-agent 2 response')] },
         })
 
       const mockToolCall = {
@@ -177,21 +186,11 @@ describe('Cost Aggregation System', () => {
         },
       }
 
-      const result = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      await handleSpawnAgents({
+        ...params,
+        agentState: parentAgentState,
         toolCall: mockToolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: mockValidatedState,
       })
-
-      await result.result
 
       // Parent should have aggregated costs: original 50 + subagent 75 + subagent 100 = 225
       expect(parentAgentState.creditsUsed).toBe(225)
@@ -213,7 +212,6 @@ describe('Cost Aggregation System', () => {
         agentTemplate: mockAgentTemplate,
         localAgentTemplates: mockLocalAgentTemplates,
         messages: [],
-        agentState: parentAgentState,
         sendSubagentChunk: () => {},
         system: 'Test system prompt',
       }
@@ -228,7 +226,7 @@ describe('Cost Aggregation System', () => {
             stepsRemaining: 10,
             creditsUsed: 50, // Successful agent
           },
-          output: { type: 'lastMessage', value: 'Successful response' },
+          output: { type: 'lastMessage', value: [assistantMessage('Successful response')] },
         })
         .mockRejectedValueOnce(
           (() => {
@@ -258,21 +256,11 @@ describe('Cost Aggregation System', () => {
         },
       }
 
-      const result = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      await handleSpawnAgents({
+        ...params,
+        agentState: parentAgentState,
         toolCall: mockToolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: mockValidatedState,
       })
-
-      await result.result
 
       // Parent should aggregate costs: original 10 + successful subagent 50 + failed subagent 25 = 85
       expect(parentAgentState.creditsUsed).toBe(85)
@@ -372,9 +360,7 @@ describe('Cost Aggregation System', () => {
         agentTemplate: mockAgentTemplate,
         localAgentTemplates: mockLocalAgentTemplates,
         messages: [],
-        agentState: mainAgentState,
         sendSubagentChunk: () => {},
-        system: 'Test system prompt',
       }
 
       const mockExecuteAgent = spyOn(spawnAgentUtils, 'executeSubagent')
@@ -383,26 +369,22 @@ describe('Cost Aggregation System', () => {
             ...getInitialAgentState(),
             agentId: 'sub-agent-1',
             agentType: 'test-agent',
-            messageHistory: [
-              { role: 'assistant', content: 'Sub-agent 1 response' },
-            ],
+            messageHistory: [assistantMessage('Sub-agent 1 response')],
             stepsRemaining: 10,
             creditsUsed: subAgent1Cost,
           } as AgentState,
-          output: { type: 'lastMessage', value: 'Sub-agent 1 response' },
+          output: { type: 'lastMessage', value: [assistantMessage('Sub-agent 1 response')] },
         })
         .mockResolvedValueOnce({
           agentState: {
             ...getInitialAgentState(),
             agentId: 'sub-agent-2',
             agentType: 'test-agent',
-            messageHistory: [
-              { role: 'assistant', content: 'Sub-agent 2 response' },
-            ],
+            messageHistory: [assistantMessage('Sub-agent 2 response')],
             stepsRemaining: 10,
             creditsUsed: subAgent2Cost,
           } as AgentState,
-          output: { type: 'lastMessage', value: 'Sub-agent 2 response' },
+          output: { type: 'lastMessage', value: [assistantMessage('Sub-agent 2 response')] },
         })
 
       const mockToolCall = {
@@ -416,21 +398,11 @@ describe('Cost Aggregation System', () => {
         },
       }
 
-      const result = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      await handleSpawnAgents({
+        ...params,
+        agentState: mainAgentState,
         toolCall: mockToolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: mockValidatedState,
       })
-
-      await result.result
 
       // Verify exact cost accounting
       expect(mainAgentState.creditsUsed).toBe(expectedTotal)

@@ -349,20 +349,26 @@ export async function revokeGrantByOperationId(params: {
  * @param userId The ID of the user
  * @returns The effective quota reset date (either existing or new)
  */
+export interface MonthlyResetResult {
+  quotaResetDate: Date
+  autoTopupEnabled: boolean
+}
+
 export async function triggerMonthlyResetAndGrant(params: {
   userId: string
   logger: Logger
-}): Promise<Date> {
+}): Promise<MonthlyResetResult> {
   const { userId, logger } = params
 
   return await db.transaction(async (tx) => {
     const now = new Date()
 
-    // Get user's current reset date
+    // Get user's current reset date and auto top-up status
     const user = await tx.query.user.findFirst({
       where: eq(schema.user.id, userId),
       columns: {
         next_quota_reset: true,
+        auto_topup_enabled: true,
       },
     })
 
@@ -370,11 +376,12 @@ export async function triggerMonthlyResetAndGrant(params: {
       throw new Error(`User ${userId} not found`)
     }
 
+    const autoTopupEnabled = user.auto_topup_enabled ?? false
     const currentResetDate = user.next_quota_reset
 
     // If reset date is in the future, no action needed
     if (currentResetDate && currentResetDate > now) {
-      return currentResetDate
+      return { quotaResetDate: currentResetDate, autoTopupEnabled }
     }
 
     // Calculate new reset date
@@ -397,25 +404,27 @@ export async function triggerMonthlyResetAndGrant(params: {
       .set({ next_quota_reset: newResetDate })
       .where(eq(schema.user.id, userId))
 
-    // Always grant free credits
-    await processAndGrantCredit({
+    // Always grant free credits - use grantCreditOperation with tx to keep everything in the same transaction
+    await grantCreditOperation({
       ...params,
       amount: freeGrantAmount,
       type: 'free',
       description: 'Monthly free credits',
       expiresAt: newResetDate, // Free credits expire at next reset
       operationId: freeOperationId,
+      tx,
     })
 
     // Only grant referral credits if there are any
     if (referralBonus > 0) {
-      await processAndGrantCredit({
+      await grantCreditOperation({
         ...params,
         amount: referralBonus,
         type: 'referral',
         description: 'Monthly referral bonus',
         expiresAt: newResetDate, // Referral credits expire at next reset
         operationId: referralOperationId,
+        tx,
       })
     }
 
@@ -432,6 +441,6 @@ export async function triggerMonthlyResetAndGrant(params: {
       'Processed monthly credit grants and reset',
     )
 
-    return newResetDate
+    return { quotaResetDate: newResetDate, autoTopupEnabled }
   })
 }

@@ -1,5 +1,15 @@
-import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
-import { getUserInfoFromApiKey as defaultGetUserInfoFromApiKey } from '@codebuff/sdk'
+import { createHash } from 'crypto'
+
+import { getCiEnv } from '@codebuff/common/env-ci'
+import {
+  AuthenticationError,
+  ErrorCodes,
+  getUserInfoFromApiKey as defaultGetUserInfoFromApiKey,
+  NetworkError,
+  RETRYABLE_ERROR_CODES,
+  MAX_RETRIES_PER_MESSAGE,
+  RETRY_BACKOFF_BASE_DELAY_MS,
+} from '@codebuff/sdk'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 
 import {
@@ -8,17 +18,22 @@ import {
   logoutUser as logoutUserUtil,
   type User,
 } from '../utils/auth'
-import { logger as defaultLogger } from '../utils/logger'
+import { resetCodebuffClient } from '../utils/codebuff-client'
+import { logger as defaultLogger, loggerContext } from '../utils/logger'
 
 import type { GetUserInfoFromApiKeyFn } from '@codebuff/common/types/contracts/database'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
+
+const getApiKeyHash = (apiKey: string): string => {
+  return createHash('sha256').update(apiKey).digest('hex')
+}
 
 // Query keys for type-safe cache management
 export const authQueryKeys = {
   all: ['auth'] as const,
   user: () => [...authQueryKeys.all, 'user'] as const,
   validation: (apiKey: string) =>
-    [...authQueryKeys.all, 'validation', apiKey] as const,
+    [...authQueryKeys.all, 'validation', getApiKeyHash(apiKey)] as const,
 }
 
 interface ValidateAuthParams {
@@ -45,18 +60,52 @@ export async function validateApiKey({
 }: ValidateAuthParams): Promise<ValidatedUserInfo> {
   const requestedFields = ['id', 'email'] as const
 
-  const authResult = await getUserInfoFromApiKey({
-    apiKey,
-    fields: requestedFields,
-    logger,
-  })
+  try {
+    const authResult = await getUserInfoFromApiKey({
+      apiKey,
+      fields: requestedFields,
+      logger,
+    })
 
-  if (!authResult) {
-    logger.error('❌ API key validation failed - no auth result returned')
-    throw new Error('Invalid API key')
+    if (!authResult) {
+      logger.error('❌ API key validation failed - invalid credentials')
+      throw new AuthenticationError('Invalid API key', 401)
+    }
+
+    return authResult
+  } catch (error) {
+    if (error instanceof AuthenticationError) {
+      logger.error('❌ API key validation failed - authentication error')
+      // Rethrow the original error to preserve error type for higher layers
+      throw error
+    }
+
+    if (error instanceof NetworkError) {
+      logger.error(
+        {
+          error: error.message,
+          code: error.code,
+        },
+        '❌ API key validation failed - network error',
+      )
+      // Rethrow the original error to preserve error type for higher layers
+      throw error
+    }
+
+    // Unknown error - wrap in NetworkError for consistency
+    logger.error(
+      {
+        error: error instanceof Error ? error.message : String(error),
+      },
+      '❌ API key validation failed - unknown error',
+    )
+    throw new NetworkError(
+      'Authentication failed',
+      ErrorCodes.UNKNOWN_ERROR,
+      undefined,
+      error,
+    )
   }
-
-  return authResult
 }
 
 export interface UseAuthQueryDeps {
@@ -79,8 +128,7 @@ export function useAuthQuery(deps: UseAuthQueryDeps = {}) {
   } = deps
 
   const userCredentials = getUserCredentials()
-  const apiKey =
-    userCredentials?.authToken || process.env[API_KEY_ENV_VAR] || ''
+  const apiKey = userCredentials?.authToken || getCiEnv().CODEBUFF_API_KEY || ''
 
   return useQuery({
     queryKey: authQueryKeys.validation(apiKey),
@@ -88,7 +136,27 @@ export function useAuthQuery(deps: UseAuthQueryDeps = {}) {
     enabled: !!apiKey,
     staleTime: 5 * 60 * 1000, // 5 minutes
     gcTime: 10 * 60 * 1000, // 10 minutes
-    retry: false, // Don't retry auth failures
+    // Retry only for retryable network errors (5xx, timeouts, etc.)
+    // Don't retry authentication errors (invalid credentials)
+    retry: (failureCount, error) => {
+      // Don't retry authentication errors - user needs to update credentials
+      if (error instanceof AuthenticationError) {
+        return false
+      }
+      // Retry network errors if they're retryable and we haven't exceeded max retries
+      if (error instanceof NetworkError && RETRYABLE_ERROR_CODES.has(error.code)) {
+        return failureCount < MAX_RETRIES_PER_MESSAGE
+      }
+      // Don't retry other errors
+      return false
+    },
+    retryDelay: (attemptIndex) => {
+      // Exponential backoff: 1s, 2s, 4s
+      return Math.min(
+        RETRY_BACKOFF_BASE_DELAY_MS * Math.pow(2, attemptIndex),
+        8000, // Cap at 8 seconds
+      )
+    },
   })
 }
 
@@ -113,52 +181,22 @@ export function useLoginMutation(deps: UseLoginMutationDeps = {}) {
 
   return useMutation({
     mutationFn: async (user: User) => {
-      logger.info(
-        {
-          userName: user.name,
-          userEmail: user.email,
-          userId: user.id,
-          hasAuthToken: !!user.authToken,
-        },
-        '🔄 Login mutation started - saving and validating credentials',
-      )
-
       // Save credentials to file system
-      logger.info('💾 Saving credentials to file system...')
       saveUserCredentials(user)
-      logger.info('✅ Credentials saved to file system')
 
       // Validate the new credentials
-      logger.info('🔍 Validating the saved credentials...')
       const authResult = await validateApiKey({
         apiKey: user.authToken,
         getUserInfoFromApiKey,
         logger,
       })
-      logger.info('✅ Credentials validated successfully')
 
       const mergedUser = { ...user, ...authResult }
-      logger.info(
-        {
-          mergedFields: Object.keys(mergedUser),
-        },
-        '📦 Returning merged user data',
-      )
       return mergedUser
     },
-    onSuccess: (data) => {
-      logger.info(
-        {
-          userName: data.name,
-          userId: data.id,
-        },
-        '🎉 Login mutation onSuccess - invalidating queries',
-      )
-
+    onSuccess: () => {
       // Invalidate auth queries to trigger refetch with new credentials
       queryClient.invalidateQueries({ queryKey: authQueryKeys.all })
-
-      logger.info({ user: data.name }, '✅ User logged in successfully')
     },
     onError: (error) => {
       logger.error(
@@ -189,10 +227,13 @@ export function useLogoutMutation(deps: UseLogoutMutationDeps = {}) {
   return useMutation({
     mutationFn: logoutUser,
     onSuccess: () => {
+      // Reset the SDK client after logout
+      resetCodebuffClient()
       // Clear all auth-related cache
       queryClient.removeQueries({ queryKey: authQueryKeys.all })
-
-      logger.info('User logged out successfully')
+      // Clear logger context
+      delete loggerContext.userId
+      delete loggerContext.userEmail
     },
     onError: (error) => {
       logger.error(error, 'Logout failed')

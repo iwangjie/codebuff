@@ -76,6 +76,7 @@ export const user = pgTable('user', {
   auto_topup_enabled: boolean('auto_topup_enabled').notNull().default(false),
   auto_topup_threshold: integer('auto_topup_threshold'),
   auto_topup_amount: integer('auto_topup_amount'),
+  banned: boolean('banned').notNull().default(false),
 })
 
 export const account = pgTable(
@@ -211,6 +212,7 @@ export const message = pgTable(
     output_tokens: integer('output_tokens').notNull(),
     cost: numeric('cost', { precision: 100, scale: 20 }).notNull(),
     credits: integer('credits').notNull(),
+    byok: boolean('byok').notNull().default(false),
     latency_ms: integer('latency_ms'),
     user_id: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
 

@@ -12,56 +12,50 @@ import type { ToolRenderConfig } from './types'
  */
 export const CodeSearchComponent = defineToolComponent({
   toolName: 'code_search',
-  
-  render(toolBlock, theme, options): ToolRenderConfig | null {
+
+  render(toolBlock): ToolRenderConfig {
     const input = toolBlock.input as any
     const pattern = input?.pattern ?? ''
-    const flags = input?.flags ?? ''
-    
+    const cwd = input?.cwd ?? ''
+
     // Count results from output
     let totalResults = 0
-    let fileCount = 0
-    
+
     if (toolBlock.output && typeof toolBlock.output === 'string') {
       const lines = toolBlock.output.split('\n')
-      const files = new Set<string>()
-      
+
       for (const line of lines) {
         const trimmed = line.trim()
-        
-        // File paths end with a colon and typically start with ./ or /
-        if (trimmed.endsWith(':') && (trimmed.startsWith('./') || trimmed.startsWith('/'))) {
-          files.add(trimmed.slice(0, -1)) // Remove trailing colon
-        }
+
         // Result lines start with a number followed by a colon
-        else if (/^\d+:/.test(trimmed)) {
+        if (/^\d+:/.test(trimmed)) {
           totalResults++
         }
       }
-      
-      fileCount = files.size
     }
-    
+
     // Build single-line summary
-    let summary = `"${pattern}"`
-    
-    if (flags) {
-      summary += ` ${flags}`
+    let summary = ''
+
+    summary += `${pattern}`
+
+    if (cwd) {
+      summary += ` in ${cwd}`
     }
-    
-    summary += ` → ${totalResults} result${totalResults === 1 ? '' : 's'}`
-    
-    if (fileCount > 0) {
-      summary += ` across ${fileCount} file${fileCount === 1 ? '' : 's'}`
-    }
-    
+
+    // Disable showing flags since they are noisy.
+    // if (flags) {
+    //   summary += ` ${flags}`
+    // }
+
+    summary += ` (${totalResults} result${totalResults === 1 ? '' : 's'})`
+
     // Return as content using SimpleToolCallItem
     return {
       content: (
         <SimpleToolCallItem
-          name="Code Search"
+          name="Search"
           description={summary}
-          branchChar={options.branchChar}
         />
       ),
     }

@@ -3,8 +3,6 @@ import * as path from 'path'
 
 import { z } from 'zod/v4'
 
-import { CodebuffConfigSchema } from '../json-config/constants'
-
 import type { CodebuffFileSystem } from '../types/filesystem'
 
 export const FileTreeNodeSchema: z.ZodType<FileTreeNode> = z.object({
@@ -43,14 +41,19 @@ export const customToolDefinitionsSchema = z
   .record(
     z.string(),
     z.object({
-      inputJsonSchema: z.any(),
+      // inputSchema can be a Zod schema (from MCP tools) or a JSON Schema object
+      // (from SDK custom tools that have been serialized). The agent-runtime
+      // converts JSON schemas to Zod using ensureZodSchema() before use.
+      inputSchema: z.custom<z.ZodType | Record<string, unknown>>(),
       endsAgentStep: z.boolean().optional().default(false),
       description: z.string().optional(),
       exampleInputs: z.record(z.string(), z.any()).array().optional(),
     }),
   )
   .default(() => ({}))
-export type CustomToolDefinitions = z.input<typeof customToolDefinitionsSchema>
+export type CustomToolDefinitions = NonNullable<
+  z.input<typeof customToolDefinitionsSchema>
+>
 
 export const ProjectFileContextSchema = z.object({
   projectRoot: z.string(),
@@ -64,7 +67,6 @@ export const ProjectFileContextSchema = z.object({
   userKnowledgeFiles: z.record(z.string(), z.string()).optional(),
   agentTemplates: z.record(z.string(), z.any()).default(() => ({})),
   customToolDefinitions: customToolDefinitionsSchema,
-  codebuffConfig: CodebuffConfigSchema.optional(),
   gitChanges: z.object({
     status: z.string(),
     diff: z.string(),
@@ -83,7 +85,33 @@ export const ProjectFileContextSchema = z.object({
   }),
 })
 
-export type ProjectFileContext = z.infer<typeof ProjectFileContextSchema>
+export type ProjectFileContext = {
+  projectRoot: string
+  cwd: string
+  fileTree: FileTreeNode[]
+  fileTokenScores: Record<string, Record<string, number>>
+  tokenCallers?: Record<string, Record<string, string[]>>
+  knowledgeFiles: Record<string, string>
+  userKnowledgeFiles?: Record<string, string>
+  agentTemplates: Record<string, any>
+  customToolDefinitions: CustomToolDefinitions
+  gitChanges: {
+    status: string
+    diff: string
+    diffCached: string
+    lastCommitMessages: string
+  }
+  changesSinceLastChat: Record<string, string>
+  shellConfigFiles: Record<string, string>
+  systemInfo: {
+    platform: string
+    shell: string
+    nodeVersion: string
+    arch: string
+    homedir: string
+    cpus: number
+  }
+}
 
 export const fileRegex =
   /<write_file>\s*<path>([^<]+)<\/path>\s*<content>([\s\S]*?)<\/content>\s*<\/write_file>/g
@@ -110,7 +138,6 @@ export const getStubProjectFileContext = (): ProjectFileContext => ({
   userKnowledgeFiles: {},
   agentTemplates: {},
   customToolDefinitions: {},
-  codebuffConfig: undefined,
   gitChanges: {
     status: '',
     diff: '',
@@ -215,13 +242,31 @@ export const ensureEndsWithNewline = (
   return contents + '\n'
 }
 
+/**
+ * Node-compatible file existence check.
+ * Uses fs.stat instead of Bun-specific fs.exists.
+ */
+export async function fileExists(params: {
+  filePath: string
+  fs: CodebuffFileSystem
+}): Promise<boolean> {
+  const { filePath, fs } = params
+
+  try {
+    await fs.stat(filePath)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export const ensureDirectoryExists = async (params: {
   baseDir: string
   fs: CodebuffFileSystem
 }) => {
   const { baseDir, fs } = params
 
-  if (!(await fs.exists(baseDir))) {
+  if (!(await fileExists({ filePath: baseDir, fs }))) {
     await fs.mkdir(baseDir, { recursive: true })
   }
 }

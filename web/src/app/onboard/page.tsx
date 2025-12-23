@@ -6,7 +6,6 @@ import { db } from '@codebuff/internal/db'
 import * as schema from '@codebuff/internal/db/schema'
 import { env } from '@codebuff/internal/env'
 import { and, eq, gt } from 'drizzle-orm'
-import Image from 'next/image'
 import { redirect } from 'next/navigation'
 import { getServerSession } from 'next-auth'
 
@@ -16,15 +15,16 @@ import CardWithBeams from '@/components/card-with-beams'
 import { OnboardClientWrapper } from '@/components/onboard/onboard-client-wrapper'
 
 interface PageProps {
-  searchParams?: {
+  searchParams?: Promise<{
     auth_code?: string
     referral_code?: string
-  }
+  }>
 }
 
-const Onboard = async ({ searchParams = {} }: PageProps) => {
-  const authCode = searchParams.auth_code
-  const referralCode = searchParams.referral_code
+const Onboard = async ({ searchParams }: PageProps) => {
+  const resolvedSearchParams = searchParams ? await searchParams : {}
+  const authCode = resolvedSearchParams.auth_code
+  const referralCode = resolvedSearchParams.referral_code
   const session = await getServerSession(authOptions)
   const user = session?.user
 
@@ -52,17 +52,14 @@ const Onboard = async ({ searchParams = {} }: PageProps) => {
       title: 'Welcome to Codebuff!',
       description: hasReferralInUrl
         ? "Once you've installed Codebuff, you can close this window."
-        : 'You can close this window.',
+        : '',
       content: (
-        <div className="flex flex-col space-y-2">
-          <Image
-            src="/auth-success.png"
-            alt="Successful authentication"
-            width={600}
-            height={600}
-          />
+        <div className="flex flex-col space-y-4 text-center">
+          <p className="text-lg">
+            You're all set! Head back to your terminal to continue.
+          </p>
           {hasReferralInUrl && (
-            <p className="text-center text-muted-foreground">
+            <p className="text-muted-foreground">
               Don't forget to enter your referral code in the CLI to claim your
               bonus credits!
             </p>
@@ -208,34 +205,23 @@ const Onboard = async ({ searchParams = {} }: PageProps) => {
     return !!session.length
   })
 
-  // No longer auto-redeem referral codes - users must enter them in CLI
-  let referralMessage = <></>
-  if (referralCode) {
-    referralMessage = (
-      <p className="text-center text-muted-foreground">
-        Don't forget to enter your referral code in the CLI to claim your bonus
-        credits!
-      </p>
-    )
-  }
-
   // Render the result for CLI flow
   if (didInsert) {
     const isReferralUser = !!referralCode
     const successCard = CardWithBeams({
-      title: 'Nicely done!',
+      title: 'Login successful!',
       description: isReferralUser
         ? 'Follow the steps above to install Codebuff, then you can close this window.'
-        : 'Feel free to close this window and head back to your terminal.',
+        : '',
       content: (
-        <div className="flex flex-col space-y-2">
-          <Image
-            src="/auth-success.png"
-            alt="Successful authentication"
-            width={600}
-            height={600}
-          />
-          {referralMessage}
+        <div className="flex flex-col space-y-4 text-center">
+          <p className="text-lg">Return to your terminal to continue.</p>
+          {referralCode && (
+            <p className="text-muted-foreground">
+              Don't forget to enter your referral code in the CLI to claim your
+              bonus credits!
+            </p>
+          )}
         </div>
       ),
     })

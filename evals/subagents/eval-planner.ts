@@ -1,13 +1,17 @@
 import * as fs from 'fs'
 import * as path from 'path'
+
+import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
+import {
+  CodebuffClient,
+  getUserCredentials,
+  loadLocalAgents,
+} from '@codebuff/sdk'
 import { createTwoFilesPatch } from 'diff'
 
-import { CodebuffClient } from '../../sdk/src/client'
-import { AgentDefinition } from '../../sdk/src'
-import { getUserCredentials } from '@codebuff/npm-app/credentials'
-import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
-import { loadLocalAgents } from '@codebuff/npm-app/agents/load-agents'
 import { withTestRepo } from './test-repo-utils'
+
+import type { AgentDefinition } from '@codebuff/sdk'
 
 export const evalPlannerAgent = async (params: {
   client: CodebuffClient
@@ -156,7 +160,7 @@ Evaluate how well the implementation plan matches the real commit changes. Consi
 const judgeAgent: AgentDefinition = {
   id: 'eval-judge',
   displayName: 'Eval Judge',
-  model: 'openai/gpt-5',
+  model: 'openai/gpt-5.1',
   toolNames: ['set_output'],
   inputSchema: {
     prompt: { type: 'string', description: 'The prompt to judge' },

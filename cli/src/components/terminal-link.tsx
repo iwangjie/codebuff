@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react'
 
+import { Button } from './button'
 import { useTheme } from '../hooks/use-theme'
 
 type FormatLinesFn = (text: string, maxWidth?: number) => string[]
@@ -19,6 +20,7 @@ export interface TerminalLinkProps {
 }
 
 const defaultFormatLines: FormatLinesFn = (text) => [text]
+const PREFIXES_TO_STRIP = ['https://', 'http://']
 
 export const TerminalLink: React.FC<TerminalLinkProps> = ({
   text,
@@ -36,12 +38,19 @@ export const TerminalLink: React.FC<TerminalLinkProps> = ({
   const theme = useTheme()
 
   // Use theme colors as defaults if not provided
-  const linkColor = color ?? theme.info
+  const linkColor = color ?? theme.link
   const linkActiveColor = activeColor ?? theme.success
   const [isHovered, setIsHovered] = useState(false)
 
   const displayLines = useMemo(() => {
-    const formatted = formatLines(text, maxWidth)
+    let displayText = text.trim()
+    for (const prefix of PREFIXES_TO_STRIP) {
+      if (displayText.startsWith(prefix)) {
+        displayText = displayText.slice(prefix.length)
+      }
+    }
+
+    const formatted = formatLines(displayText, maxWidth)
     if (formatted.length <= 1) {
       return formatted
     }
@@ -63,7 +72,7 @@ export const TerminalLink: React.FC<TerminalLinkProps> = ({
   }
 
   return (
-    <box
+    <Button
       style={{
         flexDirection: 'column',
         alignItems: 'flex-start',
@@ -73,7 +82,7 @@ export const TerminalLink: React.FC<TerminalLinkProps> = ({
       }}
       onMouseOver={() => setIsHovered(true)}
       onMouseOut={() => setIsHovered(false)}
-      onMouseDown={handleActivate}
+      onClick={handleActivate}
     >
       {displayLines.map((line: string, index: number) => {
         const coloredText = <span fg={displayColor}>{line}</span>
@@ -83,6 +92,6 @@ export const TerminalLink: React.FC<TerminalLinkProps> = ({
           </text>
         )
       })}
-    </box>
+    </Button>
   )
 }

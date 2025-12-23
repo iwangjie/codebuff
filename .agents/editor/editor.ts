@@ -1,150 +1,144 @@
+import { AgentDefinition, StepText } from 'types/agent-definition'
 import { publisher } from '../constants'
-import { type SecretAgentDefinition } from '../types/secret-agent-definition'
 
-import type { Message } from 'types/util-types'
+export const createCodeEditor = (options: {
+  model: 'gpt-5' | 'opus'
+}): Omit<AgentDefinition, 'id'> => {
+  const { model } = options
+  return {
+    publisher,
+    model:
+      options.model === 'gpt-5'
+        ? 'openai/gpt-5.1'
+        : 'anthropic/claude-opus-4.5',
+    displayName: 'Code Editor',
+    spawnerPrompt:
+      "Expert code editor that implements code changes based on the user's request. Do not specify an input prompt for this agent; it inherits the context of the entire conversation with the user. Make sure to read any files intended to be edited before spawning this agent as it cannot read files on its own.",
+    outputMode: 'structured_output',
+    toolNames: ['write_file', 'str_replace', 'set_output'],
 
-const editor: SecretAgentDefinition = {
-  id: 'editor',
-  publisher,
-  model: 'anthropic/claude-sonnet-4.5',
-  displayName: 'Code Editor',
-  spawnerPrompt:
-    'Expert code editor with access to tools to find and edit files, run terminal commands, and search the web. Can handle small to medium sized tasks, or work off of a plan for more complex tasks. For easy tasks, you can spawn this agent directly rather than invoking a researcher or planner first. Spawn mulitple in parallel if needed, but only on totally distinct tasks.',
-  inputSchema: {
-    prompt: {
-      type: 'string',
-      description: 'The coding task to implement',
+    includeMessageHistory: true,
+    inheritParentSystemPrompt: true,
+
+    instructionsPrompt: `You are an expert code editor with deep understanding of software engineering principles. You were spawned to generate an implementation for the user's request. Do not spawn an editor agent, you are the editor agent and have already been spawned.
+    
+Your task is to write out ALL the code changes needed to complete the user's request in a single comprehensive response.
+
+Important: You can not make any other tool calls besides editing files. You cannot read more files, write todos, spawn agents, or set output. set_output in particular should not be used. Do not call any of these tools!
+
+Write out what changes you would make using the tool call format below. Use this exact format for each file change:
+
+<codebuff_tool_call>
+{
+  "cb_tool_name": "str_replace",
+  "path": "path/to/file",
+  "replacements": [
+    {
+      "old": "exact old code",
+      "new": "exact new code"
     },
-    params: {
-      type: 'object',
-      properties: {
-        maxContextLength: {
-          type: 'number',
-        },
-      },
-      required: [],
+    {
+      "old": "exact old code 2",
+      "new": "exact new code 2"
     },
-  },
-  outputMode: 'structured_output',
-  toolNames: [
-    'read_files',
-    'write_file',
-    'str_replace',
-    'run_terminal_command',
-    'code_search',
-    'spawn_agents',
-    'add_message',
-    'set_output',
-    'end_turn',
-  ],
-  spawnableAgents: ['file-explorer', 'researcher-web', 'researcher-docs'],
+  ]
+}
+</codebuff_tool_call>
 
-  includeMessageHistory: true,
-  inheritParentSystemPrompt: true,
+OR for new files or major rewrites:
 
-  instructionsPrompt: `You are an expert code editor with deep understanding of software engineering principles.
+<codebuff_tool_call>
+{
+  "cb_tool_name": "write_file",
+  "path": "path/to/file",
+  "instructions": "What the change does",
+  "content": "Complete file content or edit snippet"
+}
+</codebuff_tool_call>
 
-Implement the requested changes, using your judgment as needed, but referring to the original <user_message> as the most important source of information.
+${
+  model === 'gpt-5'
+    ? ''
+    : `Before you start writing your implementation, you should use <think> tags to think about the best way to implement the changes.
 
-# Instructions
+You can also use <think> tags interspersed between tool calls to think about the best way to implement the changes.
 
-- Read any relevant files that have not already been read. Or, spawn a file-explorer to find any other relevant parts of the codebase.
-- Implement changes using str_replace or write_file.
-- Verify your changes by running tests, typechecking, etc. Keep going until you are sure the changes are correct.
-- You must use the set_output tool before finishing and include the following in your summary:
-  - An answer to the user prompt (if they asked a question).
-  - An explanation of the changes made.
-  - A note on any checks you ran to verify the changes, such as tests, typechecking, etc., and the results of those checks.
-  - Do not include a section on the benefits of the changes, as we're most interested in the changes themselves and what still needs to be done.
-- Do not write a summary outside of the one that you include in the set_output tool.
-- As soon as you use set_output, you must end your turn using the end_turn tool.
-`,
+<example>
 
-  handleSteps: function* ({ agentState: initialAgentState }) {
-    const stepLimit = 25
-    let stepCount = 0
-    let agentState = initialAgentState
-    let accumulatedEditToolResults: any[] = []
+<think>
+[ Long think about the best way to implement the changes ]
+</think>
 
-    while (true) {
-      stepCount++
+<codebuff_tool_call>
+[ First tool call to implement the feature ]
+</codebuff_tool_call>
 
-      const stepResult = yield 'STEP'
-      agentState = stepResult.agentState // Capture the latest state
+<codebuff_tool_call>
+[ Second tool call to implement the feature ]
+</codebuff_tool_call>
 
-      // Accumulate new tool messages from this step
-      const { messageHistory } = agentState
+<think>
+[ Thoughts about a tricky part of the implementation ]
+</think>
 
-      // Extract and accumulate new edit tool results using helper function
-      accumulatedEditToolResults.push(
-        ...getLatestEditToolResults(messageHistory),
-      )
+<codebuff_tool_call>
+[ Third tool call to implement the feature ]
+</codebuff_tool_call>
 
-      if (stepResult.stepsComplete) {
-        break
-      }
-
-      // If we've reached within one of the step limit, ask LLM to summarize progress
-      if (stepCount === stepLimit - 1) {
-        yield {
-          toolName: 'add_message',
-          input: {
-            role: 'user',
-            content:
-              'You have reached the step limit. Please use the set_output tool now to summarize your progress so far including all specific actions you took (note that any file changes will be included automatically in the output), what you still need to solve, and provide any insights that could help complete the remaining work. Please end your turn after using the set_output tool with the end_turn tool.',
-          },
-          includeToolCall: false,
-        }
-
-        // One final step to produce the summary
-        const finalStepResult = yield 'STEP'
-        agentState = finalStepResult.agentState
-
-        // Extract and accumulate final edit tool results using helper function
-        accumulatedEditToolResults.push(
-          ...getLatestEditToolResults(agentState.messageHistory),
-        )
-        break
-      }
-    }
-
-    yield {
-      toolName: 'set_output',
-      input: {
-        ...agentState.output,
-        edits: accumulatedEditToolResults,
-      },
-    }
-
-    function getLatestEditToolResults(messageHistory: Message[]) {
-      const lastAssistantMessageIndex = messageHistory.findLastIndex(
-        (message) => message.role === 'assistant',
-      )
-
-      // Get all edit tool messages after the last assistant message
-      const newToolMessages = messageHistory
-        .slice(lastAssistantMessageIndex + 1)
-        .filter((message) => message.role === 'tool')
-        .filter(
-          (message) =>
-            message.content.toolName === 'write_file' ||
-            message.content.toolName === 'str_replace',
-        )
-
-      // Extract and return new edit tool results
-      return (
-        newToolMessages
-          .flatMap((message) => message.content.output)
-          .filter((output) => output.type === 'json')
-          .map((output) => output.value)
-          // Only successful edits!
-          .filter(
-            (toolResult) =>
-              toolResult && !('errorMessage' in (toolResult as any)),
-          )
-      )
-    }
-  },
+</example>`
 }
 
-export default editor
+Your implementation should:
+- Be complete and comprehensive
+- Include all necessary changes to fulfill the user's request
+- Follow the project's conventions and patterns
+- Be as simple and maintainable as possible
+- Reuse existing code wherever possible
+- Be well-structured and organized
+
+More style notes:
+- Extra try/catch blocks clutter the code -- use them sparingly.
+- Optional arguments are code smell and worse than required arguments.
+- New components often should be added to a new file, not added to an existing file.
+
+Write out your complete implementation now, formatting all changes as tool calls as shown above.`,
+
+    handleSteps: function* ({ agentState: initialAgentState, logger }) {
+      const initialMessageHistoryLength =
+        initialAgentState.messageHistory.length
+      const { agentState } = yield 'STEP'
+      const { messageHistory } = agentState
+
+      const newMessages = messageHistory.slice(initialMessageHistoryLength)
+
+      yield {
+        toolName: 'set_output',
+        input: {
+          output: {
+            messages: newMessages,
+          },
+        },
+        includeToolCall: false,
+      }
+
+      // Extract only tool calls from text, removing any commentary
+      function extractToolCallsOnly(text: string): string {
+        const toolExtractionPattern =
+          /<codebuff_tool_call>[\s\S]*?<\/codebuff_tool_call>/g
+        const matches: string[] = []
+
+        for (const match of text.matchAll(toolExtractionPattern)) {
+          matches.push(match[0])
+        }
+
+        return matches.join('\n')
+      }
+    },
+  } satisfies Omit<AgentDefinition, 'id'>
+}
+
+const definition = {
+  ...createCodeEditor({ model: 'opus' }),
+  id: 'editor',
+}
+export default definition

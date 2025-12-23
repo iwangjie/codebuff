@@ -1,0 +1,81 @@
+---
+title: 'Modes'
+section: 'help'
+tags: ['modes', 'lite', 'max', 'plan', 'configuration']
+order: 2
+---
+
+# Modes
+
+Codebuff has four modes. Switch during a session with `Shift+Tab` or `/mode:` commands.
+
+<MarkdownTable>
+| Mode | Model | Editor Agent | Code Review |
+| --- | --- | --- | --- | --- |
+| Default | Claude Opus 4.5 | editor | Yes |
+| Lite | Grok 4.1 Fast | editor-gpt-5 | No |
+| Max | Claude Opus 4.5 | editor-multi-prompt | Yes |
+| Plan | Claude Opus 4.5 | None | No |
+</MarkdownTable>
+
+## Default
+
+Standard mode with Claude Opus 4.5:
+
+- Spawns [file pickers](/publishers/codebuff/agents/file-picker) and [code searchers](/publishers/codebuff/agents/code-searcher) to gather context
+- Uses the [`editor`](/publishers/codebuff/agents/editor) agent for code changes
+- Spawns [`thinker`](/publishers/codebuff/agents/thinker) for complex problems
+- Runs code review after changes
+- Validates with typechecks and tests
+
+```bash
+codebuff  # no flag needed
+```
+
+## Lite
+
+Grok 4.1 Fast, cheaper and faster:
+
+- Less file context gathering
+- Uses GPT-5.1 for code changes ([`editor-gpt-5`](/publishers/codebuff/agents/editor-gpt-5) agent)
+- Skips code review
+- No todo tracking
+
+Good for quick fixes and simple questions.
+
+```bash
+codebuff --lite
+```
+
+## Max
+
+Claude Opus 4.5 with best-of-N selection:
+
+- Reads 12-20+ files per task
+- Spawns multiple [editor](/publishers/codebuff/agents/editor) agents in parallel, each with a different strategy
+- A selector compares outputs and picks the best one
+- Spawns [`thinker-best-of-n-opus`](/publishers/codebuff/agents/thinker-best-of-n-opus) for hard problems
+- Full code review after changes
+- Runs typechecks and tests on both the changed files and the full project
+
+Use for complex features and refactors.
+
+```bash
+codebuff --max
+```
+
+## Plan
+
+Planning mode. No file writes.
+
+- Gathers context about your codebase
+- Asks clarifying questions using `ask_user`
+- Outputs a spec/plan wrapped in `<PLAN>` tags
+- Includes requirements, constraints, and relevant files
+
+Use this to scope out work before implementing, or to discuss approaches without making changes.
+
+```bash
+codebuff --plan
+```
+

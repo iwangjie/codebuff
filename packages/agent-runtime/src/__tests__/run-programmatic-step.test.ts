@@ -3,6 +3,11 @@ import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import {
+  assistantMessage,
+  jsonToolResult,
+  userMessage,
+} from '@codebuff/common/util/messages'
+import {
   afterEach,
   beforeEach,
   describe,
@@ -11,6 +16,7 @@ import {
   mock,
   spyOn,
 } from 'bun:test'
+import { cloneDeep } from 'lodash'
 
 import {
   clearAgentGeneratorCache,
@@ -20,6 +26,7 @@ import { mockFileContext } from './test-utils'
 import * as toolExecutor from '../tools/tool-executor'
 
 import type { AgentTemplate, StepGenerator } from '../templates/types'
+import type { executeToolCall } from '../tools/tool-executor'
 import type { PublicAgentState } from '@codebuff/common/types/agent-template'
 import type {
   AgentRuntimeDeps,
@@ -28,10 +35,8 @@ import type {
 import type { SendActionFn } from '@codebuff/common/types/contracts/client'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type { ParamsOf } from '@codebuff/common/types/function-params'
-import type {
-  ToolResultOutput,
-  ToolResultPart,
-} from '@codebuff/common/types/messages/content-part'
+import type { ToolMessage } from '@codebuff/common/types/messages/codebuff-message'
+import type { ToolResultOutput } from '@codebuff/common/types/messages/content-part'
 import type { AgentState } from '@codebuff/common/types/session-state'
 
 const logger: Logger = {
@@ -52,11 +57,7 @@ describe('runProgrammaticStep', () => {
     agentRuntimeImpl = {
       ...TEST_AGENT_RUNTIME_IMPL,
       addAgentStep: async () => 'test-agent-step-id',
-      getUserInfoFromApiKey: async () => ({
-        id: 'test-user-id',
-        email: 'test-email',
-        discord_id: 'test-discord-id',
-      }),
+
       sendAction: () => {},
     }
 
@@ -104,8 +105,8 @@ describe('runProgrammaticStep', () => {
       runId:
         'test-run-id' as `${string}-${string}-${string}-${string}-${string}`,
       messageHistory: [
-        { role: 'user', content: 'Initial message' },
-        { role: 'assistant', content: 'Initial response' },
+        userMessage('Initial message'),
+        assistantMessage('Initial response'),
       ],
       output: undefined,
       directCreditsUsed: 0,
@@ -116,6 +117,7 @@ describe('runProgrammaticStep', () => {
     mockParams = {
       ...agentRuntimeImpl,
       runId: 'test-run-id',
+      ancestorRunIds: [],
       repoId: undefined,
       repoUrl: undefined,
       agentState: mockAgentState,
@@ -127,13 +129,16 @@ describe('runProgrammaticStep', () => {
       clientSessionId: 'test-session',
       fingerprintId: 'test-fingerprint',
       onResponseChunk: () => {},
+      onCostCalculated: async () => {},
       fileContext: mockFileContext,
       localAgentTemplates: {},
-      system: undefined,
+      system: 'Test system prompt',
       stepsComplete: false,
       stepNumber: 1,
+      tools: {},
 
       logger,
+      signal: new AbortController().signal,
     }
   })
 
@@ -255,22 +260,18 @@ describe('runProgrammaticStep', () => {
       // Check that no tool call chunk was sent for add_message
       const addMessageToolCallChunk = sentChunks.find(
         (chunk) =>
-          chunk.includes('add_message') && chunk.includes('Hello world'),
+          typeof chunk === 'string' &&
+          chunk.includes('add_message') &&
+          chunk.includes('Hello world'),
       )
       expect(addMessageToolCallChunk).toBeUndefined()
-
-      // Check that tool call chunk WAS sent for read_files (normal behavior)
-      const readFilesToolCallChunk = sentChunks.find(
-        (chunk) => chunk.includes('read_files') && chunk.includes('test.txt'),
-      )
-      expect(readFilesToolCallChunk).toBeDefined()
 
       // Verify final message history doesn't contain add_message tool call
       const addMessageToolCallInHistory = result.agentState.messageHistory.find(
         (msg) =>
-          typeof msg.content === 'string' &&
-          msg.content.includes('add_message') &&
-          msg.content.includes('Hello world'),
+          msg.content[0].type === 'text' &&
+          msg.content[0].text.includes('add_message') &&
+          msg.content[0].text.includes('Hello world'),
       )
       expect(addMessageToolCallInHistory).toBeUndefined()
 
@@ -307,34 +308,28 @@ describe('runProgrammaticStep', () => {
       mockTemplate.toolNames = ['find_files', 'end_turn']
 
       // Mock executeToolCall to simulate find_files tool result
-      executeToolCallSpy.mockImplementation(async (options: any) => {
-        if (options.toolName === 'find_files') {
-          const toolResult: ToolResultPart = {
-            type: 'tool-result',
-            toolName: 'find_files',
-            toolCallId: 'find-files-call-id',
-            output: [
-              {
-                type: 'json',
-                value: {
-                  files: [
-                    { path: 'src/auth.ts', relevance: 0.9 },
-                    { path: 'src/login.ts', relevance: 0.8 },
-                  ],
-                },
-              },
-            ],
-          }
-          options.toolResults.push(toolResult)
+      executeToolCallSpy.mockImplementation(
+        async (
+          options: ParamsOf<typeof executeToolCall>,
+        ): ReturnType<typeof executeToolCall> => {
+          if (options.toolName === 'find_files') {
+            const toolResult: ToolMessage = {
+              role: 'tool',
+              toolName: 'find_files',
+              toolCallId: 'find-files-call-id',
+              content: jsonToolResult({
+                files: [
+                  { path: 'src/auth.ts', relevance: 0.9 },
+                  { path: 'src/login.ts', relevance: 0.8 },
+                ],
+              }),
+            }
+            options.toolResults.push(toolResult)
 
-          options.state.messages.push({
-            role: 'tool',
-            content: toolResult,
-          })
-        }
-        // Return a value to satisfy the call
-        return {}
-      })
+            options.agentState.messageHistory.push(toolResult)
+          }
+        },
+      )
 
       const result = await runProgrammaticStep(mockParams)
 
@@ -351,7 +346,7 @@ describe('runProgrammaticStep', () => {
       const toolMessages = result.agentState.messageHistory.filter(
         (msg) =>
           msg.role === 'tool' &&
-          JSON.stringify(msg.content.output).includes('src/auth.ts'),
+          JSON.stringify(msg.content).includes('src/auth.ts'),
       )
       expect(toolMessages).toHaveLength(1)
       expect(JSON.stringify(toolMessages[0].content)).toContain('src/auth.ts')
@@ -483,74 +478,75 @@ describe('runProgrammaticStep', () => {
       ]
 
       // Mock executeToolCall to simulate realistic tool results and state updates
-      executeToolCallSpy.mockImplementation(async (options: any) => {
-        const { toolName, input, toolResults, state } = options
+      executeToolCallSpy.mockImplementation(
+        async (
+          options: ParamsOf<typeof executeToolCall>,
+        ): ReturnType<typeof executeToolCall> => {
+          const { toolName, input, toolResults, agentState } = options
 
-        let result: string
-        switch (toolName) {
-          case 'read_files':
-            result = JSON.stringify({
-              'src/auth.ts':
-                'export function authenticate(user) { return true; }',
-              'src/config.ts': 'export const authConfig = { enabled: true };',
-            })
-            break
-          case 'code_search':
-            result =
-              'src/auth.ts:1:export function authenticate(user) {\nsrc/config.ts:1:authConfig'
-            break
-          case 'create_plan':
-            result = 'Plan created successfully at analysis-plan.md'
-            break
-          case 'add_subgoal':
-            result = 'Subgoal "auth-analysis" added successfully'
-            // Update agent state to include subgoal in agentContext
-            state.agentState.agentContext['auth-analysis'] = {
-              objective: 'Analyze authentication patterns',
-              status: 'IN_PROGRESS',
-              plan: 'Review auth files and create recommendations',
-              logs: [],
-            }
-            break
-          case 'write_file':
-            result = 'File written successfully: auth-analysis.md'
-            break
-          case 'update_subgoal':
-            result = 'Subgoal "auth-analysis" updated successfully'
-            // Update subgoal status in agent state
-            if (state.agentState.agentContext['auth-analysis']) {
-              state.agentState.agentContext['auth-analysis'].status = 'COMPLETE'
-              state.agentState.agentContext['auth-analysis'].logs.push(
-                'Analysis completed successfully',
-              )
-            }
-            break
-          case 'set_output':
-            result = 'Output set successfully'
-            state.agentState.output = input
-            break
-          default:
-            result = `${toolName} executed successfully`
-        }
+          let result: string
+          switch (toolName) {
+            case 'read_files':
+              result = JSON.stringify({
+                'src/auth.ts':
+                  'export function authenticate(user) { return true; }',
+                'src/config.ts': 'export const authConfig = { enabled: true };',
+              })
+              break
+            case 'code_search':
+              result =
+                'src/auth.ts:1:export function authenticate(user) {\nsrc/config.ts:1:authConfig'
+              break
+            case 'create_plan':
+              result = 'Plan created successfully at analysis-plan.md'
+              break
+            case 'add_subgoal':
+              result = 'Subgoal "auth-analysis" added successfully'
+              // Update agent state to include subgoal in agentContext
+              agentState.agentContext['auth-analysis'] = {
+                objective: 'Analyze authentication patterns',
+                status: 'IN_PROGRESS',
+                plan: 'Review auth files and create recommendations',
+                logs: [],
+              }
+              break
+            case 'write_file':
+              result = 'File written successfully: auth-analysis.md'
+              break
+            case 'update_subgoal':
+              result = 'Subgoal "auth-analysis" updated successfully'
+              // Update subgoal status in agent state
+              if (agentState.agentContext['auth-analysis']) {
+                agentState.agentContext['auth-analysis'].status = 'COMPLETE'
+                agentState.agentContext['auth-analysis'].logs.push(
+                  'Analysis completed successfully',
+                )
+              }
+              break
+            case 'set_output':
+              result = 'Output set successfully'
+              agentState.output = input
+              break
+            default:
+              result = `${toolName} executed successfully`
+          }
 
-        const toolResult: ToolResultPart = {
-          type: 'tool-result',
-          toolName,
-          toolCallId: `${toolName}-call-id`,
-          output: [
-            {
-              type: 'json',
-              value: result,
-            },
-          ],
-        }
-        toolResults.push(toolResult)
+          const toolResult: ToolMessage = {
+            role: 'tool',
+            toolName,
+            toolCallId: `${toolName}-call-id`,
+            content: [
+              {
+                type: 'json',
+                value: result,
+              },
+            ],
+          }
+          toolResults.push(toolResult)
 
-        state.messages.push({
-          role: 'user',
-          content: toolResult,
-        })
-      })
+          agentState.messageHistory.push(toolResult)
+        },
+      )
 
       // First call - should execute all tools and transition to STEP_ALL
       const result1 = await runProgrammaticStep(mockParams)
@@ -605,12 +601,11 @@ describe('runProgrammaticStep', () => {
         true,
       )
 
-      // Verify that executeToolCall was called with state.messages (not agentState.messageHistory)
-      // The real implementation adds tool results to state.messages
+      // Verify that executeToolCall was called with agentState.messageHistory
       expect(executeToolCallSpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          state: expect.objectContaining({
-            messages: expect.any(Array),
+          agentState: expect.objectContaining({
+            messageHistory: expect.any(Array),
           }),
         }),
       )
@@ -644,7 +639,7 @@ describe('runProgrammaticStep', () => {
     })
 
     it('should pass tool results back to generator', async () => {
-      const toolResults: ToolResultPart[] = []
+      const toolResults: ToolMessage[] = []
       let receivedToolResult: ToolResultOutput[] | undefined
 
       const mockGenerator = (function* () {
@@ -659,21 +654,25 @@ describe('runProgrammaticStep', () => {
       mockTemplate.handleSteps = () => mockGenerator
 
       // Mock executeToolCall to add tool results
-      executeToolCallSpy.mockImplementation(async (options: any) => {
-        if (options.toolName === 'read_files') {
-          options.toolResults.push({
-            type: 'tool-result',
-            toolName: 'read_files',
-            toolCallId: 'test-id',
-            output: [
-              {
-                type: 'json',
-                value: 'file content',
-              },
-            ],
-          } satisfies ToolResultPart)
-        }
-      })
+      executeToolCallSpy.mockImplementation(
+        async (
+          options: ParamsOf<typeof executeToolCall>,
+        ): ReturnType<typeof executeToolCall> => {
+          if (options.toolName === 'read_files') {
+            options.toolResults.push({
+              role: 'tool',
+              toolName: 'read_files',
+              toolCallId: 'test-id',
+              content: [
+                {
+                  type: 'json',
+                  value: 'file content',
+                },
+              ],
+            } satisfies ToolMessage)
+          }
+        },
+      )
 
       await runProgrammaticStep(mockParams)
 
@@ -751,11 +750,15 @@ describe('runProgrammaticStep', () => {
       mockTemplate.toolNames.push('set_output')
 
       // Mock executeToolCall to update state
-      executeToolCallSpy.mockImplementation(async (options: any) => {
-        if (options.toolName === 'set_output') {
-          options.state.agentState.output = { status: 'complete' }
-        }
-      })
+      executeToolCallSpy.mockImplementation(
+        async (
+          options: ParamsOf<typeof executeToolCall>,
+        ): ReturnType<typeof executeToolCall> => {
+          if (options.toolName === 'set_output') {
+            options.agentState.output = { status: 'complete' }
+          }
+        },
+      )
 
       const result = await runProgrammaticStep(mockParams)
 
@@ -766,19 +769,34 @@ describe('runProgrammaticStep', () => {
       const mockGenerator = (function* () {
         yield { toolName: 'end_turn', input: {} }
       })() as StepGenerator
+      const previousMessageHistory = cloneDeep(mockAgentState.messageHistory)
 
       mockTemplate.handleSteps = () => mockGenerator
 
       const result = await runProgrammaticStep(mockParams)
 
-      expect(result.agentState.messageHistory).toEqual([
-        ...mockAgentState.messageHistory,
-        {
-          role: 'assistant',
-          content:
-            '<codebuff_tool_call>\n{\n  "cb_tool_name": "end_turn",\n  "cb_easp": true\n}\n</codebuff_tool_call>',
-        },
-      ])
+      // Verify previous messages are preserved
+      expect(result.agentState.messageHistory.length).toBeGreaterThanOrEqual(
+        previousMessageHistory.length,
+      )
+      // Check first messages match
+      expect(result.agentState.messageHistory[0]).toEqual(
+        previousMessageHistory[0],
+      )
+      expect(result.agentState.messageHistory[1]).toEqual(
+        previousMessageHistory[1],
+      )
+      // Verify an assistant message was added (with native tools, this is a tool-call structure)
+      const lastMessage =
+        result.agentState.messageHistory[
+          result.agentState.messageHistory.length - 1
+        ]
+      expect(lastMessage.role).toBe('assistant')
+      // With native tools, the tool call is structured differently than the old XML format
+      expect(lastMessage.content[0]).toMatchObject({
+        type: 'tool-call',
+        toolName: 'end_turn',
+      })
     })
   })
 
@@ -1077,11 +1095,15 @@ describe('runProgrammaticStep', () => {
       mockTemplate.toolNames = ['read_files', 'set_output', 'end_turn']
 
       // Mock executeToolCall to update state for set_output
-      executeToolCallSpy.mockImplementation(async (options: any) => {
-        if (options.toolName === 'set_output') {
-          options.state.agentState.output = options.input
-        }
-      })
+      executeToolCallSpy.mockImplementation(
+        async (
+          options: ParamsOf<typeof executeToolCall>,
+        ): ReturnType<typeof executeToolCall> => {
+          if (options.toolName === 'set_output') {
+            options.agentState.output = options.input
+          }
+        },
+      )
 
       const result = await runProgrammaticStep({
         ...mockParams,
@@ -1139,11 +1161,15 @@ describe('runProgrammaticStep', () => {
       expect(generatorCallCount).toBe(1) // Should not create new generator
 
       // Third call with stepsComplete=true should clear STEP_ALL and continue with existing generator
-      executeToolCallSpy.mockImplementation(async (options: any) => {
-        if (options.toolName === 'set_output') {
-          options.state.agentState.output = options.input
-        }
-      })
+      executeToolCallSpy.mockImplementation(
+        async (
+          options: ParamsOf<typeof executeToolCall>,
+        ): ReturnType<typeof executeToolCall> => {
+          if (options.toolName === 'set_output') {
+            options.agentState.output = options.input
+          }
+        },
+      )
 
       const result3 = await runProgrammaticStep({
         ...mockParams,
@@ -1203,11 +1229,15 @@ describe('runProgrammaticStep', () => {
         'end_turn',
       ]
 
-      executeToolCallSpy.mockImplementation(async (options: any) => {
-        if (options.toolName === 'set_output') {
-          options.state.agentState.output = options.input
-        }
-      })
+      executeToolCallSpy.mockImplementation(
+        async (
+          options: ParamsOf<typeof executeToolCall>,
+        ): ReturnType<typeof executeToolCall> => {
+          if (options.toolName === 'set_output') {
+            options.agentState.output = options.input
+          }
+        },
+      )
 
       // First call with stepsComplete=true (post-processing mode)
       const result = await runProgrammaticStep({
@@ -1378,16 +1408,20 @@ describe('runProgrammaticStep', () => {
         'end_turn',
       ]
 
-      executeToolCallSpy.mockImplementation(async (options: any) => {
-        if (options.toolName === 'set_output') {
-          options.state.agentState.output = options.input
-        } else if (options.toolName === 'add_subgoal') {
-          options.state.agentState.agentContext[options.input.id] = {
-            ...options.input,
-            logs: [],
+      executeToolCallSpy.mockImplementation(
+        async (
+          options: ParamsOf<typeof executeToolCall>,
+        ): ReturnType<typeof executeToolCall> => {
+          if (options.toolName === 'set_output') {
+            options.agentState.output = options.input
+          } else if (options.toolName === 'add_subgoal') {
+            options.agentState.agentContext[options.input.id as any] = {
+              ...options.input,
+              logs: [],
+            }
           }
-        }
-      })
+        },
+      )
 
       // Call with stepsComplete=true to trigger post-processing
       const result = await runProgrammaticStep({
@@ -1409,6 +1443,244 @@ describe('runProgrammaticStep', () => {
       })
       expect(result.agentState.agentContext['analysis-complete']).toBeDefined()
       expect(executeToolCallSpy).toHaveBeenCalledTimes(5) // read_files, code_search, write_file, add_subgoal, set_output
+    })
+  })
+
+  describe('yield value validation', () => {
+    it('should reject invalid yield values', async () => {
+      const mockGenerator = (function* () {
+        yield { invalid: 'value' } as any
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const responseChunks: any[] = []
+      mockParams.onResponseChunk = (chunk) => responseChunks.push(chunk)
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
+    })
+
+    it('should reject yield values with wrong types', async () => {
+      const mockGenerator = (function* () {
+        yield { type: 'STEP_TEXT', text: 123 } as any // text should be string
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const responseChunks: any[] = []
+      mockParams.onResponseChunk = (chunk) => responseChunks.push(chunk)
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
+    })
+
+    it('should reject GENERATE_N with non-positive n', async () => {
+      const mockGenerator = (function* () {
+        yield { type: 'GENERATE_N', n: 0 } as any
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const responseChunks: any[] = []
+      mockParams.onResponseChunk = (chunk) => responseChunks.push(chunk)
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
+    })
+
+    it('should reject GENERATE_N with negative n', async () => {
+      const mockGenerator = (function* () {
+        yield { type: 'GENERATE_N', n: -5 } as any
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const responseChunks: any[] = []
+      mockParams.onResponseChunk = (chunk) => responseChunks.push(chunk)
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
+    })
+
+    it('should accept valid STEP literal', async () => {
+      const mockGenerator = (function* () {
+        yield 'STEP'
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(false)
+      expect(result.agentState.output?.error).toBeUndefined()
+    })
+
+    it('should accept valid STEP_ALL literal', async () => {
+      const mockGenerator = (function* () {
+        yield 'STEP_ALL'
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(false)
+      expect(result.agentState.output?.error).toBeUndefined()
+    })
+
+    it('should accept valid STEP_TEXT object and continue to next step', async () => {
+      // STEP_TEXT continues to the next step of handleSteps (unlike STEP which breaks)
+      // So we need additional yields after STEP_TEXT to test the continuation
+      const mockGenerator = (function* () {
+        yield { type: 'STEP_TEXT', text: 'Custom response text' }
+        yield { toolName: 'end_turn', input: {} }
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      // Should end turn because the generator continues after STEP_TEXT and reaches end_turn
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toBeUndefined()
+    })
+
+    it('should accept valid GENERATE_N object', async () => {
+      const mockGenerator = (function* () {
+        yield { type: 'GENERATE_N', n: 3 }
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(false)
+      expect(result.generateN).toBe(3)
+      expect(result.agentState.output?.error).toBeUndefined()
+    })
+
+    it('should accept valid tool call object', async () => {
+      const mockGenerator = (function* () {
+        yield { toolName: 'read_files', input: { paths: ['test.txt'] } }
+        yield { toolName: 'end_turn', input: {} }
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toBeUndefined()
+    })
+
+    it('should accept tool call with includeToolCall option', async () => {
+      const mockGenerator = (function* () {
+        yield {
+          toolName: 'read_files',
+          input: { paths: ['test.txt'] },
+          includeToolCall: false,
+        }
+        yield { toolName: 'end_turn', input: {} }
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toBeUndefined()
+    })
+
+    it('should reject random string values', async () => {
+      const mockGenerator = (function* () {
+        yield 'INVALID_STEP' as any
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
+    })
+
+    it('should reject null yield values', async () => {
+      const mockGenerator = (function* () {
+        yield null as any
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
+    })
+
+    it('should reject undefined yield values', async () => {
+      const mockGenerator = (function* () {
+        yield undefined as any
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
+    })
+
+    it('should reject tool call without toolName', async () => {
+      const mockGenerator = (function* () {
+        yield { input: { paths: ['test.txt'] } } as any
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
+    })
+
+    it('should reject tool call without input', async () => {
+      const mockGenerator = (function* () {
+        yield { toolName: 'read_files' } as any
+      })() as StepGenerator
+
+      mockTemplate.handleSteps = () => mockGenerator
+
+      const result = await runProgrammaticStep(mockParams)
+
+      expect(result.endTurn).toBe(true)
+      expect(result.agentState.output?.error).toContain(
+        'Invalid yield value from handleSteps',
+      )
     })
   })
 

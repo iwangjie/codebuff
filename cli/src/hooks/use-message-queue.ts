@@ -1,24 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import type { PendingImage } from '../state/chat-store'
+
+export type StreamStatus = 'idle' | 'waiting' | 'streaming'
+
+export type QueuedMessage = {
+  content: string
+  images: PendingImage[]
+}
+
 export const useMessageQueue = (
-  sendMessage: (content: string) => void,
+  sendMessage: (message: QueuedMessage) => void,
   isChainInProgressRef: React.MutableRefObject<boolean>,
   activeAgentStreamsRef: React.MutableRefObject<number>,
 ) => {
-  const [queuedMessages, setQueuedMessages] = useState<string[]>([])
-  const [isStreaming, setIsStreaming] = useState<boolean>(false)
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
+  const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle')
   const [canProcessQueue, setCanProcessQueue] = useState<boolean>(true)
-  const [isWaitingForResponse, setIsWaitingForResponse] =
-    useState<boolean>(false)
+  const [queuePaused, setQueuePaused] = useState<boolean>(false)
 
-  const queuedMessagesRef = useRef<string[]>([])
+  const queuedMessagesRef = useRef<QueuedMessage[]>([])
   const streamTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const streamIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const streamMessageIdRef = useRef<string | null>(null)
+  const isQueuePausedRef = useRef<boolean>(false)
 
   useEffect(() => {
     queuedMessagesRef.current = queuedMessages
   }, [queuedMessages])
+
+  useEffect(() => {
+    isQueuePausedRef.current = queuePaused
+  }, [queuePaused])
 
   const clearStreaming = useCallback(() => {
     if (streamTimeoutRef.current) {
@@ -31,7 +44,7 @@ export const useMessageQueue = (
     }
     streamMessageIdRef.current = null
     activeAgentStreamsRef.current = 0
-    setIsStreaming(false)
+    setStreamStatus('idle')
   }, [activeAgentStreamsRef])
 
   useEffect(() => {
@@ -41,8 +54,8 @@ export const useMessageQueue = (
   }, [clearStreaming])
 
   useEffect(() => {
-    if (!canProcessQueue) return
-    if (isStreaming) return
+    if (!canProcessQueue || queuePaused) return
+    if (streamStatus !== 'idle') return
     if (streamMessageIdRef.current) return
     if (isChainInProgressRef.current) return
     if (activeAgentStreamsRef.current > 0) return
@@ -61,40 +74,62 @@ export const useMessageQueue = (
     return () => clearTimeout(timeoutId)
   }, [
     canProcessQueue,
-    isStreaming,
+    queuePaused,
+    streamStatus,
     sendMessage,
     isChainInProgressRef,
     activeAgentStreamsRef,
   ])
 
-  const addToQueue = useCallback((message: string) => {
-    const newQueue = [...queuedMessagesRef.current, message]
+  const addToQueue = useCallback((message: string, images: PendingImage[] = []) => {
+    const queuedMessage = { content: message, images }
+    const newQueue = [...queuedMessagesRef.current, queuedMessage]
     queuedMessagesRef.current = newQueue
     setQueuedMessages(newQueue)
   }, [])
 
+  const pauseQueue = useCallback(() => {
+    setQueuePaused(true)
+    setCanProcessQueue(false)
+  }, [])
+
+  const resumeQueue = useCallback(() => {
+    setQueuePaused(false)
+    setCanProcessQueue(true)
+  }, [])
+
+  const clearQueue = useCallback(() => {
+    const current = queuedMessagesRef.current
+    queuedMessagesRef.current = []
+    setQueuedMessages([])
+    return current
+  }, [])
+
   const startStreaming = useCallback(() => {
-    setIsStreaming(true)
+    setStreamStatus('streaming')
     setCanProcessQueue(false)
   }, [])
 
   const stopStreaming = useCallback(() => {
-    setIsStreaming(false)
-    setCanProcessQueue(true)
-  }, [])
+    setStreamStatus('idle')
+    setCanProcessQueue(!queuePaused)
+  }, [queuePaused])
 
   return {
     queuedMessages,
-    isStreaming,
+    streamStatus,
     canProcessQueue,
-    isWaitingForResponse,
+    queuePaused,
     streamMessageIdRef,
     addToQueue,
     startStreaming,
     stopStreaming,
-    setIsWaitingForResponse,
+    setStreamStatus,
     clearStreaming,
     setCanProcessQueue,
-    setIsStreaming,
+    pauseQueue,
+    resumeQueue,
+    clearQueue,
+    isQueuePausedRef,
   }
 }

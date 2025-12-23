@@ -2,7 +2,7 @@ import { env } from '@codebuff/internal/env'
 import { afterEach, beforeEach, describe, expect, mock, it } from 'bun:test'
 import { NextRequest } from 'next/server'
 
-import { postChatCompletions } from '../_post'
+import { formatQuotaResetCountdown, postChatCompletions } from '../_post'
 
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
 import type { InsertMessageBigqueryFn } from '@codebuff/common/types/contracts/bigquery'
@@ -20,13 +20,19 @@ import type {
 describe('/api/v1/chat/completions POST endpoint', () => {
   const mockUserData: Record<
     string,
-    NonNullable<Awaited<GetUserInfoFromApiKeyOutput<'id'>>>
+    { id: string; banned: boolean }
   > = {
     'test-api-key-123': {
       id: 'user-123',
+      banned: false,
     },
     'test-api-key-no-credits': {
       id: 'user-no-credits',
+      banned: false,
+    },
+    'test-api-key-blocked': {
+      id: 'banned-user-id',
+      banned: true,
     },
   }
 
@@ -37,7 +43,7 @@ describe('/api/v1/chat/completions POST endpoint', () => {
     if (!userData) {
       return null
     }
-    return { id: userData.id } as any
+    return { id: userData.id, banned: userData.banned } as any
   }
 
   let mockLogger: Logger
@@ -47,8 +53,13 @@ describe('/api/v1/chat/completions POST endpoint', () => {
   let mockGetAgentRunFromId: GetAgentRunFromIdFn
   let mockFetch: typeof globalThis.fetch
   let mockInsertMessageBigquery: InsertMessageBigqueryFn
+  let nextQuotaReset: string
 
   beforeEach(() => {
+    nextQuotaReset = new Date(
+      Date.now() + 3 * 24 * 60 * 60 * 1000 + 5 * 60 * 1000,
+    ).toISOString()
+
     mockLogger = {
       error: mock(() => {}),
       warn: mock(() => {}),
@@ -63,13 +74,25 @@ describe('/api/v1/chat/completions POST endpoint', () => {
     mockGetUserUsageData = mock(async ({ userId }: { userId: string }) => {
       if (userId === 'user-no-credits') {
         return {
-          balance: { totalRemaining: 0 },
-          nextQuotaReset: '2024-12-31',
+          usageThisCycle: 0,
+          balance: {
+            totalRemaining: 0,
+            totalDebt: 0,
+            netBalance: 0,
+            breakdown: {},
+          },
+          nextQuotaReset,
         }
       }
       return {
-        balance: { totalRemaining: 100 },
-        nextQuotaReset: '2024-12-31',
+        usageThisCycle: 0,
+        balance: {
+          totalRemaining: 100,
+          totalDebt: 0,
+          netBalance: 100,
+          breakdown: {},
+        },
+        nextQuotaReset,
       }
     })
 
@@ -331,6 +354,40 @@ describe('/api/v1/chat/completions POST endpoint', () => {
     })
   })
 
+  describe('Banned users', () => {
+    it('returns 403 with clear message for banned users', async () => {
+      const req = new NextRequest(
+        'http://localhost:3000/api/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: { Authorization: 'Bearer test-api-key-blocked' },
+          body: JSON.stringify({
+            stream: true,
+            codebuff_metadata: { run_id: 'run-123' },
+          }),
+        },
+      )
+
+      const response = await postChatCompletions({
+        req,
+        getUserInfoFromApiKey: mockGetUserInfoFromApiKey,
+        logger: mockLogger,
+        trackEvent: mockTrackEvent,
+        getUserUsageData: mockGetUserUsageData,
+        getAgentRunFromId: mockGetAgentRunFromId,
+        fetch: mockFetch,
+        insertMessageBigquery: mockInsertMessageBigquery,
+        loggerWithContext: mockLoggerWithContext,
+      })
+
+      expect(response.status).toBe(403)
+      const body = await response.json()
+      expect(body.error).toBe('account_suspended')
+      expect(body.message).toContain('Your account has been suspended due to billing issues')
+      expect(body.message).toContain('to resolve this')
+    })
+  })
+
   describe('Credit validation', () => {
     it('returns 402 when user has insufficient credits', async () => {
       const req = new NextRequest(
@@ -359,10 +416,9 @@ describe('/api/v1/chat/completions POST endpoint', () => {
 
       expect(response.status).toBe(402)
       const body = await response.json()
-      expect(body.message).toContain('Insufficient credits')
-      expect(body.message).toContain(
-        `${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/usage`,
-      )
+      const expectedResetCountdown = formatQuotaResetCountdown(nextQuotaReset)
+      expect(body.message).toContain(expectedResetCountdown)
+      expect(body.message).not.toContain(nextQuotaReset)
     })
   })
 

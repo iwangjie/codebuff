@@ -1,7 +1,20 @@
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import { BYOK_OPENROUTER_HEADER } from '@codebuff/common/constants/byok'
 import { getErrorObject } from '@codebuff/common/util/error'
+import { pluralize } from '@codebuff/common/util/string'
 import { env } from '@codebuff/internal/env'
 import { NextResponse } from 'next/server'
+
+import {
+  handleOpenAINonStream,
+  OPENAI_SUPPORTED_MODELS,
+} from '@/llm-api/openai'
+import {
+  handleOpenRouterNonStream,
+  handleOpenRouterStream,
+  OpenRouterError,
+} from '@/llm-api/openrouter'
+import { extractApiKeyFromHeader } from '@/util/auth'
 
 import type { TrackEventFn } from '@codebuff/common/types/contracts/analytics'
 import type { InsertMessageBigqueryFn } from '@codebuff/common/types/contracts/bigquery'
@@ -16,11 +29,41 @@ import type {
 } from '@codebuff/common/types/contracts/logger'
 import type { NextRequest } from 'next/server'
 
-import {
-  handleOpenRouterNonStream,
-  handleOpenRouterStream,
-} from '@/llm-api/openrouter'
-import { extractApiKeyFromHeader } from '@/util/auth'
+export const formatQuotaResetCountdown = (
+  nextQuotaReset: string | null | undefined,
+): string => {
+  if (!nextQuotaReset) {
+    return 'soon'
+  }
+
+  const resetDate = new Date(nextQuotaReset)
+  if (Number.isNaN(resetDate.getTime())) {
+    return 'soon'
+  }
+
+  const now = Date.now()
+  const diffMs = resetDate.getTime() - now
+  if (diffMs <= 0) {
+    return 'soon'
+  }
+
+  const minuteMs = 60 * 1000
+  const hourMs = 60 * minuteMs
+  const dayMs = 24 * hourMs
+
+  const days = Math.floor(diffMs / dayMs)
+  if (days > 0) {
+    return `in ${pluralize(days, 'day')}`
+  }
+
+  const hours = Math.floor(diffMs / hourMs)
+  if (hours > 0) {
+    return `in ${pluralize(hours, 'hour')}`
+  }
+
+  const minutes = Math.max(1, Math.floor(diffMs / minuteMs))
+  return `in ${pluralize(minutes, 'minute')}`
+}
 
 export async function postChatCompletions(params: {
   req: NextRequest
@@ -47,7 +90,7 @@ export async function postChatCompletions(params: {
 
   try {
     // Parse request body
-    let body: {}
+    let body: Record<string, unknown>
     try {
       body = await req.json()
     } catch (error) {
@@ -85,7 +128,7 @@ export async function postChatCompletions(params: {
     // Get user info
     const userInfo = await getUserInfoFromApiKey({
       apiKey,
-      fields: ['id', 'email', 'discord_id'],
+      fields: ['id', 'email', 'discord_id', 'stripe_customer_id', 'banned'],
       logger,
     })
     if (!userInfo) {
@@ -105,6 +148,23 @@ export async function postChatCompletions(params: {
     logger = loggerWithContext({ userInfo })
 
     const userId = userInfo.id
+    const stripeCustomerId = userInfo.stripe_customer_id ?? null
+
+    // Check if user is banned.
+    // We use a clear, helpful message rather than a cryptic error because:
+    // 1. Legitimate users banned by mistake deserve to know what's happening
+    // 2. Bad actors will figure out they're banned regardless of the message
+    // 3. Clear messaging encourages resolution (matches our dispute notification email)
+    // 4. 403 Forbidden is the correct HTTP status for "you're not allowed"
+    if (userInfo.banned) {
+      return NextResponse.json(
+        {
+          error: 'account_suspended',
+          message: `Your account has been suspended due to billing issues. Please contact ${env.NEXT_PUBLIC_SUPPORT_EMAIL} to resolve this.`,
+        },
+        { status: 403 },
+      )
+    }
 
     // Track API request
     trackEvent({
@@ -133,9 +193,10 @@ export async function postChatCompletions(params: {
         },
         logger,
       })
+      const resetCountdown = formatQuotaResetCountdown(nextQuotaReset)
       return NextResponse.json(
         {
-          message: `Insufficient credits. Please add credits at ${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/usage or wait for your next cycle to begin (${nextQuotaReset}).`,
+          message: `Out of credits. Please add credits at ${env.NEXT_PUBLIC_CODEBUFF_APP_URL}/usage. Your free credits reset ${resetCountdown}.`,
         },
         { status: 402 },
       )
@@ -200,6 +261,8 @@ export async function postChatCompletions(params: {
       )
     }
 
+    const openrouterApiKey = req.headers.get(BYOK_OPENROUTER_HEADER)
+
     // Handle streaming vs non-streaming
     try {
       if (bodyStream) {
@@ -207,7 +270,9 @@ export async function postChatCompletions(params: {
         const stream = await handleOpenRouterStream({
           body,
           userId,
+          stripeCustomerId,
           agentId,
+          openrouterApiKey,
           fetch,
           logger,
           insertMessageBigquery,
@@ -233,14 +298,38 @@ export async function postChatCompletions(params: {
         })
       } else {
         // Non-streaming request
-        const result = await handleOpenRouterNonStream({
-          body,
-          userId,
-          agentId,
-          fetch,
-          logger,
-          insertMessageBigquery,
-        })
+        const model = (body as any)?.model
+        const shortModelName =
+          typeof model === 'string' ? model.split('/')[1] : undefined
+        const isOpenAIDirectModel =
+          typeof model === 'string' &&
+          model.startsWith('openai/') &&
+          OPENAI_SUPPORTED_MODELS.includes(shortModelName as any)
+        // Only use OpenAI endpoint for OpenAI models with n parameter
+        // All other models (including non-OpenAI with n parameter) should use OpenRouter
+        const shouldUseOpenAIEndpoint =
+          isOpenAIDirectModel && (body as any)?.codebuff_metadata?.n
+
+        const result = await (shouldUseOpenAIEndpoint
+          ? handleOpenAINonStream({
+              body,
+              userId,
+              stripeCustomerId,
+              agentId,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            })
+          : handleOpenRouterNonStream({
+              body,
+              userId,
+              stripeCustomerId,
+              agentId,
+              openrouterApiKey,
+              fetch,
+              logger,
+              insertMessageBigquery,
+            }))
 
         trackEvent({
           event: AnalyticsEvent.CHAT_COMPLETIONS_GENERATION_STARTED,
@@ -256,9 +345,34 @@ export async function postChatCompletions(params: {
         return NextResponse.json(result)
       }
     } catch (error) {
+      let openrouterError: OpenRouterError | undefined
+      if (error instanceof OpenRouterError) {
+        openrouterError = error
+      }
+
+      // Log detailed error information for debugging
+      const errorDetails = openrouterError?.toJSON()
       logger.error(
-        { error: getErrorObject(error), body },
-        'Error with OpenRouter request',
+        {
+          error: getErrorObject(error),
+          userId,
+          agentId,
+          runId: runIdFromBody,
+          model: (body as any)?.model,
+          streaming: !!bodyStream,
+          hasByokKey: !!openrouterApiKey,
+          messageCount: Array.isArray((body as any)?.messages)
+            ? (body as any).messages.length
+            : 0,
+          openrouterStatusCode: openrouterError?.statusCode,
+          openrouterStatusText: openrouterError?.statusText,
+          openrouterErrorCode: errorDetails?.error?.code,
+          openrouterErrorType: errorDetails?.error?.type,
+          openrouterErrorMessage: errorDetails?.error?.message,
+          openrouterProviderName: errorDetails?.error?.metadata?.provider_name,
+          openrouterProviderRaw: errorDetails?.error?.metadata?.raw,
+        },
+        'OpenRouter request failed',
       )
       trackEvent({
         event: AnalyticsEvent.CHAT_COMPLETIONS_ERROR,
@@ -271,6 +385,12 @@ export async function postChatCompletions(params: {
         },
         logger,
       })
+
+      // Pass through OpenRouter provider-specific errors
+      if (error instanceof OpenRouterError) {
+        return NextResponse.json(error.toJSON(), { status: error.statusCode })
+      }
+
       return NextResponse.json(
         { error: 'Failed to process request' },
         { status: 500 },

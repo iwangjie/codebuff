@@ -1,30 +1,135 @@
-import { env } from '@codebuff/common/env'
-import { PostHog } from 'posthog-node'
+import {
+  createPostHogClient,
+  generateAnonymousId,
+  type AnalyticsClientWithIdentify,
+  type PostHogClientOptions,
+} from '@codebuff/common/analytics-core'
+import { env as defaultEnv, IS_PROD as defaultIsProd } from '@codebuff/common/env'
 
 import type { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+
+// Re-export types from core for backwards compatibility
+export type { AnalyticsClientWithIdentify as AnalyticsClient } from '@codebuff/common/analytics-core'
+
+export enum AnalyticsErrorStage {
+  Init = 'init',
+  Track = 'track',
+  Identify = 'identify',
+  Flush = 'flush',
+  CaptureException = 'captureException',
+}
+
+type AnalyticsErrorContext = {
+  stage: AnalyticsErrorStage
+} & Record<string, unknown>
+
+type AnalyticsErrorLogger = (
+  error: unknown,
+  context: AnalyticsErrorContext,
+) => void
+
+/** Dependencies that can be injected for testing */
+export interface AnalyticsDeps {
+  env: {
+    NEXT_PUBLIC_POSTHOG_API_KEY?: string
+    NEXT_PUBLIC_POSTHOG_HOST_URL?: string
+  }
+  isProd: boolean
+  createClient: (apiKey: string, options: PostHogClientOptions) => AnalyticsClientWithIdentify
+  generateAnonymousId?: () => string
+}
 
 // Prints the events to console
 // It's very noisy, so recommended you set this to true
 // only when you're actively adding new analytics
 let DEBUG_DEV_EVENTS = false
 
-// Store the identified user ID
+// Anonymous ID used before user identification (for PostHog alias)
+let anonymousId: string | undefined
+// Real user ID after identification
 let currentUserId: string | undefined
-let client: PostHog | undefined
+let client: AnalyticsClientWithIdentify | undefined
+
+// Store injected dependencies (for testing)
+let injectedDeps: AnalyticsDeps | undefined
+
+/** Get current env config (injected or default) */
+function getEnv() {
+  return injectedDeps?.env ?? defaultEnv
+}
+
+/** Get current isProd flag (injected or default) */
+function getIsProd() {
+  return injectedDeps?.isProd ?? defaultIsProd
+}
+
+/** Get client factory (injected or default PostHog) */
+function getCreateClient() {
+  return injectedDeps?.createClient ?? createPostHogClient
+}
+
+/** Get anonymous ID generator (injected or default) */
+function getGenerateAnonymousId() {
+  return injectedDeps?.generateAnonymousId ?? generateAnonymousId
+}
+
+/** Get current distinct ID (real user ID if identified, otherwise anonymous ID) */
+function getDistinctId(): string | undefined {
+  return currentUserId ?? anonymousId
+}
+
+/** Reset analytics state - for testing only */
+export function resetAnalyticsState(deps?: AnalyticsDeps) {
+  anonymousId = undefined
+  currentUserId = undefined
+  client = undefined
+  injectedDeps = deps
+}
 
 export let identified: boolean = false
+let analyticsErrorLogger: AnalyticsErrorLogger | undefined
+
+export function setAnalyticsErrorLogger(loggerFn: AnalyticsErrorLogger) {
+  analyticsErrorLogger = loggerFn
+}
+
+function logAnalyticsError(error: unknown, context: AnalyticsErrorContext) {
+  try {
+    analyticsErrorLogger?.(error, context)
+  } catch {
+    // Never throw from error reporting
+  }
+}
 
 export function initAnalytics() {
+  const env = getEnv()
+  const isProd = getIsProd()
+  const createClient = getCreateClient()
+
   if (!env.NEXT_PUBLIC_POSTHOG_API_KEY || !env.NEXT_PUBLIC_POSTHOG_HOST_URL) {
-    throw new Error(
+    const error = new Error(
       'NEXT_PUBLIC_POSTHOG_API_KEY or NEXT_PUBLIC_POSTHOG_HOST_URL is not set',
     )
+    logAnalyticsError(error, {
+      stage: AnalyticsErrorStage.Init,
+      missingEnv: true,
+    })
+    throw error
   }
 
-  client = new PostHog(env.NEXT_PUBLIC_POSTHOG_API_KEY, {
-    host: env.NEXT_PUBLIC_POSTHOG_HOST_URL,
-    enableExceptionAutocapture: env.NEXT_PUBLIC_CB_ENVIRONMENT === 'prod',
-  })
+  // Generate anonymous ID for pre-login tracking
+  // PostHog will merge this with the real user ID via alias() when user logs in
+  anonymousId = getGenerateAnonymousId()()
+
+  try {
+    client = createClient(env.NEXT_PUBLIC_POSTHOG_API_KEY, {
+      host: env.NEXT_PUBLIC_POSTHOG_HOST_URL,
+      enableExceptionAutocapture: isProd,
+    })
+  } catch (error) {
+    logAnalyticsError(error, { stage: AnalyticsErrorStage.Init })
+    throw error
+  }
 }
 
 export async function flushAnalytics() {
@@ -36,6 +141,7 @@ export async function flushAnalytics() {
   } catch (error) {
     // Silently handle PostHog network errors - don't log to console or logger
     // This prevents PostHog errors from cluttering the user's console
+    logAnalyticsError(error, { stage: AnalyticsErrorStage.Flush })
   }
 }
 
@@ -43,56 +149,102 @@ export function trackEvent(
   event: AnalyticsEvent,
   properties?: Record<string, any>,
 ) {
-  const distinctId = currentUserId
-  if (!distinctId) {
-    return
-  }
+  const distinctId = getDistinctId()
+  const isProd = getIsProd()
+
   if (!client) {
-    if (env.NEXT_PUBLIC_CB_ENVIRONMENT === 'prod') {
-      throw new Error('Analytics client not initialized')
+    if (isProd) {
+      const error = new Error('Analytics client not initialized')
+      logAnalyticsError(error, {
+        stage: AnalyticsErrorStage.Track,
+        event,
+        properties,
+      })
+      throw error
     }
     return
   }
 
-  if (env.NEXT_PUBLIC_CB_ENVIRONMENT !== 'prod') {
+  if (!distinctId) {
+    // This shouldn't happen if initAnalytics was called, but handle gracefully
+    return
+  }
+
+  if (!isProd) {
     if (DEBUG_DEV_EVENTS) {
       console.log('Analytics event sent', {
         event,
         properties,
+        distinctId,
       })
     }
     return
   }
 
-  client.capture({
-    distinctId,
-    event,
-    properties,
-  })
+  try {
+    client.capture({
+      distinctId,
+      event,
+      properties,
+    })
+  } catch (error) {
+    logAnalyticsError(error, {
+      stage: AnalyticsErrorStage.Track,
+      event,
+      properties,
+    })
+  }
 }
 
 export function identifyUser(userId: string, properties?: Record<string, any>) {
-  // Store the user ID for future events
-  currentUserId = userId
-
   if (!client) {
-    throw new Error('Analytics client not initialized')
+    const error = new Error('Analytics client not initialized')
+    logAnalyticsError(error, {
+      stage: AnalyticsErrorStage.Identify,
+      properties,
+    })
+    throw error
   }
 
-  if (env.NEXT_PUBLIC_CB_ENVIRONMENT !== 'prod') {
+  const isProd = getIsProd()
+  const previousAnonymousId = anonymousId
+
+  // Store the real user ID for future events
+  currentUserId = userId
+
+  if (!isProd) {
     if (DEBUG_DEV_EVENTS) {
       console.log('Identify event sent', {
         userId,
+        previousAnonymousId,
         properties,
       })
     }
     return
   }
 
-  client.identify({
-    distinctId: userId,
-    properties,
-  })
+  try {
+    // If we had an anonymous ID, alias it FIRST to the real user ID
+    // This must be called BEFORE identify to properly merge the event histories
+    // See: https://posthog.com/docs/libraries/node
+    if (previousAnonymousId) {
+      client.alias({
+        distinctId: userId,
+        alias: previousAnonymousId,
+      })
+    }
+
+    // Then identify the user with their properties
+    client.identify({
+      distinctId: userId,
+      properties,
+    })
+  } catch (error) {
+    logAnalyticsError(error, {
+      stage: AnalyticsErrorStage.Identify,
+      properties,
+    })
+  }
 }
 
 export function logError(
@@ -113,5 +265,9 @@ export function logError(
   } catch (postHogError) {
     // Silently handle PostHog errors - don't log them to console
     // This prevents PostHog connection issues from cluttering the user's console
+    logAnalyticsError(postHogError, {
+      stage: AnalyticsErrorStage.CaptureException,
+      properties,
+    })
   }
 }

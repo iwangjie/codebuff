@@ -1,27 +1,44 @@
-#!/usr/bin/env node
-import './polyfills/bun-strip-ansi'
-import { createRequire } from 'module'
+#!/usr/bin/env bun
 
-import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
-import { render } from '@opentui/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { promises as fs } from 'fs'
+import { createRequire } from 'module'
+import os from 'os'
+
+import { getProjectFileTree } from '@codebuff/common/project-file-tree'
+import { createCliRenderer } from '@opentui/core'
+import { createRoot } from '@opentui/react'
+import {
+  QueryClient,
+  QueryClientProvider,
+  focusManager,
+} from '@tanstack/react-query'
 import { Command } from 'commander'
+import { cyan, green, red, yellow } from 'picocolors'
 import React from 'react'
 
-import { validateAgents } from '@codebuff/sdk'
+import { App } from './app'
+import { handlePublish } from './commands/publish'
+import { initializeApp } from './init/init-app'
+import { getProjectRoot, setProjectRoot } from './project-files'
+import { initAnalytics } from './utils/analytics'
+import { getAuthTokenDetails } from './utils/auth'
+import { getCliEnv } from './utils/env'
+import { findGitRoot } from './utils/git'
+import { initializeAgentRegistry } from './utils/local-agent-registry'
+import { clearLogFile, logger } from './utils/logger'
+import { saveRecentProject } from './utils/recent-projects'
+import { detectTerminalTheme } from './utils/terminal-color-detection'
+import { setOscDetectedTheme } from './utils/theme-system'
 
-import { App } from './chat'
-import './state/theme-store' // Initialize theme store and watchers
-import { getUserCredentials } from './utils/auth'
-import { getLoadedAgentsData } from './utils/local-agent-registry'
-import { clearLogFile } from './utils/logger'
-import { loadAgentDefinitions } from './utils/load-agent-definitions'
+import type { AgentMode } from './utils/constants'
+import type { FileTreeNode } from '@codebuff/common/util/file'
 
 const require = createRequire(import.meta.url)
 
 function loadPackageVersion(): string {
-  if (process.env.CODEBUFF_CLI_VERSION) {
-    return process.env.CODEBUFF_CLI_VERSION
+  const env = getCliEnv()
+  if (env.CODEBUFF_CLI_VERSION) {
+    return env.CODEBUFF_CLI_VERSION
   }
 
   try {
@@ -36,26 +53,66 @@ function loadPackageVersion(): string {
   return 'dev'
 }
 
-const VERSION = loadPackageVersion()
+// Configure TanStack Query's focusManager for terminal environments
+// This is required because there's no browser visibility API in terminal apps
+// Without this, refetchInterval won't work because TanStack Query thinks the app is "unfocused"
+focusManager.setEventListener(() => {
+  // No-op: no event listeners in CLI environment (no window focus/visibility events)
+  return () => {}
+})
+focusManager.setFocused(true)
+
+function createQueryClient(): QueryClient {
+  return new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 5 * 60 * 1000, // 5 minutes - auth tokens don't change frequently
+        gcTime: 10 * 60 * 1000, // 10 minutes - keep cached data a bit longer
+        retry: false, // Don't retry failed auth queries automatically
+        refetchOnWindowFocus: false, // CLI doesn't have window focus
+        refetchOnReconnect: true, // Refetch when network reconnects
+        refetchOnMount: false, // Don't refetch on every mount
+      },
+      mutations: {
+        retry: 1, // Retry mutations once on failure
+      },
+    },
+  })
+}
 
 type ParsedArgs = {
   initialPrompt: string | null
   agent?: string
   clearLogs: boolean
+  continue: boolean
+  continueId?: string | null
+  cwd?: string
+  initialMode?: AgentMode
 }
 
 function parseArgs(): ParsedArgs {
   const program = new Command()
 
   program
-    .name('codecane')
-    .description('Codecane CLI - AI-powered coding assistant')
-    .version(VERSION, '-v, --version', 'Print the CLI version')
+    .name('codebuff')
+    .description('Codebuff CLI - AI-powered coding assistant')
+    .version(loadPackageVersion(), '-v, --version', 'Print the CLI version')
     .option(
       '--agent <agent-id>',
       'Specify which agent to use (e.g., "base", "ask", "file-picker")',
     )
     .option('--clear-logs', 'Remove any existing CLI log files before starting')
+    .option(
+      '--continue [conversation-id]',
+      'Continue from a previous conversation (optionally specify a conversation id)',
+    )
+    .option(
+      '--cwd <directory>',
+      'Set the working directory (default: current directory)',
+    )
+    .option('--lite', 'Start in LITE mode')
+    .option('--max', 'Start in MAX mode')
+    .option('--plan', 'Start in PLAN mode')
     .helpOption('-h, --help', 'Show this help message')
     .argument('[prompt...]', 'Initial prompt to send to the agent')
     .allowExcessArguments(true)
@@ -64,97 +121,190 @@ function parseArgs(): ParsedArgs {
   const options = program.opts()
   const args = program.args
 
+  const continueFlag = options.continue
+
+  // Determine initial mode from flags (last flag wins if multiple specified)
+  let initialMode: AgentMode | undefined
+  if (options.lite) initialMode = 'LITE'
+  if (options.max) initialMode = 'MAX'
+  if (options.plan) initialMode = 'PLAN'
+
   return {
     initialPrompt: args.length > 0 ? args.join(' ') : null,
     agent: options.agent,
     clearLogs: options.clearLogs || false,
+    continue: Boolean(continueFlag),
+    continueId:
+      typeof continueFlag === 'string' && continueFlag.trim().length > 0
+        ? continueFlag.trim()
+        : null,
+    cwd: options.cwd,
+    initialMode,
   }
 }
 
-const { initialPrompt, agent, clearLogs } = parseArgs()
-
-if (clearLogs) {
-  clearLogFile()
-}
-
-const loadedAgentsData = getLoadedAgentsData()
-
-// Validate local agents and capture any errors
-let validationErrors: Array<{ id: string; message: string }> = []
-if (loadedAgentsData) {
-  const agentDefinitions = loadAgentDefinitions()
-  const validationResult = await validateAgents(agentDefinitions, {
-    remote: true, // Use remote validation to ensure spawnable agents exist
-  })
-
-  if (!validationResult.success) {
-    validationErrors = validationResult.validationErrors
-  }
-}
-
-// Create QueryClient instance with CLI-optimized defaults
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 5 * 60 * 1000, // 5 minutes - auth tokens don't change frequently
-      gcTime: 10 * 60 * 1000, // 10 minutes - keep cached data a bit longer
-      retry: false, // Don't retry failed auth queries automatically
-      refetchOnWindowFocus: false, // CLI doesn't have window focus
-      refetchOnReconnect: true, // Refetch when network reconnects
-      refetchOnMount: false, // Don't refetch on every mount
-    },
-    mutations: {
-      retry: 1, // Retry mutations once on failure
-    },
-  },
-})
-
-// Wrapper component to handle async auth check
-const AppWithAsyncAuth = () => {
-  const [requireAuth, setRequireAuth] = React.useState<boolean | null>(null)
-  const [hasInvalidCredentials, setHasInvalidCredentials] =
-    React.useState(false)
-
-  React.useEffect(() => {
-    // Check authentication asynchronously
-    const userCredentials = getUserCredentials()
-    const apiKey =
-      userCredentials?.authToken || process.env[API_KEY_ENV_VAR] || ''
-
-    if (!apiKey) {
-      // No credentials, require auth
-      setRequireAuth(true)
-      setHasInvalidCredentials(false)
-      return
+async function main(): Promise<void> {
+  // Run OSC theme detection BEFORE anything else.
+  // This MUST happen before OpenTUI starts because OSC responses come through stdin,
+  // and OpenTUI also listens to stdin. Running detection here ensures stdin is clean.
+  if (process.stdin.isTTY && process.platform !== 'win32') {
+    try {
+      const oscTheme = await detectTerminalTheme()
+      if (oscTheme) {
+        setOscDetectedTheme(oscTheme)
+      }
+    } catch {
+      // Silently ignore OSC detection failures
     }
+  }
 
-    // We have credentials - require auth but show invalid credentials banner until validation succeeds
-    setHasInvalidCredentials(true)
-    setRequireAuth(false)
-  }, [])
+  const {
+    initialPrompt,
+    agent,
+    clearLogs,
+    continue: continueChat,
+    continueId,
+    cwd,
+    initialMode,
+  } = parseArgs()
 
-  return (
-    <App
-      initialPrompt={initialPrompt}
-      agentId={agent}
-      requireAuth={requireAuth}
-      hasInvalidCredentials={hasInvalidCredentials}
-      loadedAgentsData={loadedAgentsData}
-      validationErrors={validationErrors}
-    />
-  )
-}
+  await initializeApp({ cwd })
 
-// Start app immediately with QueryClientProvider
-function startApp() {
-  render(
+  // Detect if user is at home directory or outside a project (should show project picker)
+  const projectRoot = getProjectRoot()
+  const homeDir = os.homedir()
+  const gitRoot = findGitRoot({ cwd: projectRoot })
+  const showProjectPicker =
+    projectRoot === '/' || projectRoot === homeDir || gitRoot === null
+
+  // Initialize agent registry (loads user agents via SDK)
+  await initializeAgentRegistry()
+
+  // Handle publish command before rendering the app
+  if (process.argv.includes('publish')) {
+    const publishIndex = process.argv.indexOf('publish')
+    const agentIds = process.argv.slice(publishIndex + 1)
+    const result = await handlePublish(agentIds)
+
+    if (result.success && result.publisherId && result.agents) {
+      console.log(green('✅ Successfully published:'))
+      for (const agent of result.agents) {
+        console.log(
+          cyan(
+            `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
+          ),
+        )
+      }
+      process.exit(0)
+    } else {
+      console.log(red('❌ Publish failed'))
+      if (result.error) console.log(red(`Error: ${result.error}`))
+      if (result.details) console.log(red(result.details))
+      if (result.hint) console.log(yellow(`Hint: ${result.hint}`))
+      process.exit(1)
+    }
+  }
+
+  // Initialize analytics
+  try {
+    initAnalytics()
+  } catch (error) {
+    // Analytics initialization is optional - don't fail the app if it errors
+    logger.debug(error, 'Failed to initialize analytics')
+  }
+
+  if (clearLogs) {
+    clearLogFile()
+  }
+
+  const queryClient = createQueryClient()
+
+  const AppWithAsyncAuth = () => {
+    const [requireAuth, setRequireAuth] = React.useState<boolean | null>(null)
+    const [hasInvalidCredentials, setHasInvalidCredentials] =
+      React.useState(false)
+    const [fileTree, setFileTree] = React.useState<FileTreeNode[]>([])
+    const [currentProjectRoot, setCurrentProjectRoot] =
+      React.useState(projectRoot)
+    const [showProjectPickerScreen, setShowProjectPickerScreen] =
+      React.useState(showProjectPicker)
+
+    React.useEffect(() => {
+      const apiKey = getAuthTokenDetails().token ?? ''
+
+      if (!apiKey) {
+        setRequireAuth(true)
+        setHasInvalidCredentials(false)
+        return
+      }
+
+      setHasInvalidCredentials(true)
+      setRequireAuth(false)
+    }, [])
+
+    const loadFileTree = React.useCallback(async (root: string) => {
+      try {
+        if (root) {
+          const tree = await getProjectFileTree({
+            projectRoot: root,
+            fs: fs,
+          })
+          logger.info({ tree }, 'Loaded file tree')
+          setFileTree(tree)
+        }
+      } catch (error) {
+        // Silently fail - fileTree is optional for @ menu
+      }
+    }, [])
+
+    React.useEffect(() => {
+      loadFileTree(currentProjectRoot)
+    }, [currentProjectRoot, loadFileTree])
+
+    // Callback for when user selects a new project from the picker
+    const handleProjectChange = React.useCallback(
+      async (newProjectPath: string) => {
+        // Change process working directory
+        process.chdir(newProjectPath)
+        // Update the project root in the module state
+        setProjectRoot(newProjectPath)
+        // Save to recent projects list
+        saveRecentProject(newProjectPath)
+        // Update local state
+        setCurrentProjectRoot(newProjectPath)
+        // Reset file tree state to trigger reload
+        setFileTree([])
+        // Hide the picker and show the chat
+        setShowProjectPickerScreen(false)
+      },
+      [],
+    )
+
+    return (
+      <App
+        initialPrompt={initialPrompt}
+        agentId={agent}
+        requireAuth={requireAuth}
+        hasInvalidCredentials={hasInvalidCredentials}
+        fileTree={fileTree}
+        continueChat={continueChat}
+        continueChatId={continueId ?? undefined}
+        initialMode={initialMode}
+        showProjectPicker={showProjectPickerScreen}
+        onProjectChange={handleProjectChange}
+      />
+    )
+  }
+
+  const renderer = await createCliRenderer({
+    backgroundColor: 'transparent',
+    exitOnCtrlC: false,
+  })
+  createRoot(renderer).render(
     <QueryClientProvider client={queryClient}>
       <AppWithAsyncAuth />
     </QueryClientProvider>,
-    {
-      backgroundColor: 'transparent',
-    },
   )
 }
 
-startApp()
+void main()

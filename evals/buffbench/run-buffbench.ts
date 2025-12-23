@@ -1,22 +1,41 @@
-import fs from 'fs'
-import path from 'path'
-import os from 'os'
 import { execSync } from 'child_process'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 
 import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
-import { getUserCredentials } from '@codebuff/npm-app/credentials'
-import { loadLocalAgents } from '@codebuff/npm-app/agents/load-agents'
+import {
+  CodebuffClient,
+  getUserCredentials,
+  loadLocalAgents,
+} from '@codebuff/sdk'
 import pLimit from 'p-limit'
 
-import { runAgentOnCommit } from './agent-runner'
+import { runAgentOnCommit, type ExternalAgentType } from './agent-runner'
 import { formatTaskResults } from './format-output'
 import { judgeCommitResult } from './judge'
-import { analyzeAgentTraces, type AgentTraceData } from './trace-analyzer'
 import { extractAgentLessons, saveAgentLessons } from './lessons-extractor'
-import { CodebuffClient } from '../../sdk/src/client'
+import { analyzeAgentTraces, type AgentTraceData } from './trace-analyzer'
 import { logger } from '../logger'
-import type { AgentEvalResults, EvalDataV2 } from './types'
 import { analyzeAllTasks } from './meta-analyzer'
+
+import type { AgentEvalResults, EvalDataV2, EvalCommitV2 } from './types'
+
+function parseAgentId(agent: string): {
+  agentId: string
+  externalAgentType?: ExternalAgentType
+} {
+  if (agent.startsWith('external:')) {
+    const externalType = agent.slice('external:'.length) as ExternalAgentType
+    if (externalType !== 'claude' && externalType !== 'codex') {
+      throw new Error(
+        `Unknown external agent type: ${externalType}. Supported: claude, codex`,
+      )
+    }
+    return { agentId: agent, externalAgentType: externalType }
+  }
+  return { agentId: agent }
+}
 
 async function runTask(options: {
   client: CodebuffClient
@@ -37,6 +56,7 @@ async function runTask(options: {
   extractLessons: boolean
   printEvents: boolean
   finalCheckCommands?: string[]
+  disableAnalysis?: boolean
 }) {
   const {
     client,
@@ -53,6 +73,7 @@ async function runTask(options: {
     extractLessons,
     printEvents,
     finalCheckCommands,
+    disableAnalysis,
   } = options
 
   console.log(
@@ -62,7 +83,9 @@ async function runTask(options: {
   // Store trace data for this commit to analyze later
   const commitTraces: AgentTraceData[] = []
 
-  const agentPromises = agents.map(async (agentId) => {
+  const agentPromises = agents.map(async (agent) => {
+    const { agentId, externalAgentType } = parseAgentId(agent)
+
     const agentResult = await runAgentOnCommit({
       client,
       agentId,
@@ -73,12 +96,12 @@ async function runTask(options: {
       localAgentDefinitions,
       printEvents,
       finalCheckCommands,
+      externalAgentType,
     })
 
     const judgeResult = await judgeCommitResult({
       client,
-      prompt: commit.prompt,
-      groundTruthFileDiffs: commit.fileDiffs,
+      commit,
       contextFiles: agentResult.contextFiles,
       agentDiff: agentResult.diff,
       error: agentResult.error,
@@ -161,12 +184,14 @@ async function runTask(options: {
   const agentResults = await Promise.all(agentPromises)
 
   // After all agents complete for this commit, run trace analysis
-  const traceAnalysis = await analyzeAgentTraces({
-    client,
-    traces: commitTraces,
-    codingAgentPrompt: commit.prompt,
-    analyzerContext,
-  })
+  const traceAnalysis = disableAnalysis
+    ? undefined
+    : await analyzeAgentTraces({
+        client,
+        traces: commitTraces,
+        codingAgentPrompt: commit.prompt,
+        analyzerContext,
+      })
 
   const analysisData = {
     commitSha: commit.sha,
@@ -261,50 +286,90 @@ function installBinaries(binInstalls: EvalDataV2['binInstalls']): {
   }
 }
 
-export async function runBuffBench(options: {
+interface CommitWithSource {
+  commit: EvalCommitV2
+  evalData: EvalDataV2
   evalDataPath: string
+}
+
+export async function runBuffBench(options: {
+  evalDataPaths: string[]
   agents: string[]
   taskConcurrency?: number
   client?: CodebuffClient
   taskIds?: string[]
   extractLessons?: boolean
+  disableAnalysis?: boolean
 }) {
   const {
-    evalDataPath,
+    evalDataPaths,
     agents,
     taskConcurrency = 1,
     taskIds,
     extractLessons = false,
+    disableAnalysis = false,
   } = options
 
-  const evalData: EvalDataV2 = JSON.parse(
-    fs.readFileSync(evalDataPath, 'utf-8'),
+  if (evalDataPaths.length === 0) {
+    throw new Error('At least one eval data path is required')
+  }
+
+  // Load all eval files and create a mapping of commits to their source eval data
+  const allCommitsWithSource: CommitWithSource[] = []
+  const loadedEvalFiles: { path: string; data: EvalDataV2 }[] = []
+
+  for (const evalDataPath of evalDataPaths) {
+    const evalData: EvalDataV2 = JSON.parse(
+      fs.readFileSync(evalDataPath, 'utf-8'),
+    )
+    loadedEvalFiles.push({ path: evalDataPath, data: evalData })
+
+    for (const commit of evalData.evalCommits) {
+      allCommitsWithSource.push({
+        commit,
+        evalData,
+        evalDataPath,
+      })
+    }
+  }
+
+  console.log(
+    `Loaded ${loadedEvalFiles.length} eval file(s) with ${allCommitsWithSource.length} total tasks`,
+  )
+  for (const { path: p, data } of loadedEvalFiles) {
+    console.log(`  - ${path.basename(p)}: ${data.evalCommits.length} tasks`)
+  }
+
+  // Collect all unique binInstalls from all eval files
+  const allBinInstalls = loadedEvalFiles.flatMap(
+    (f) => f.data.binInstalls ?? [],
+  )
+  const uniqueBinInstalls = allBinInstalls.filter(
+    (bin, index, self) => index === self.findIndex((b) => b.name === bin.name),
   )
 
   // Install binaries once at the beginning
-  const { tempDir: binsTempDir, env: binsEnv } = installBinaries(
-    evalData.binInstalls,
-  )
+  const { tempDir: binsTempDir, env: binsEnv } =
+    installBinaries(uniqueBinInstalls)
 
-  // Merge binaries env with eval data env
-  const mergedEnv = { ...binsEnv, ...evalData.env }
-
-  let commitsToRun: EvalDataV2['evalCommits']
+  let commitsToRun: CommitWithSource[]
   if (taskIds && taskIds.length > 0) {
-    const foundCommits: EvalDataV2['evalCommits'] = []
+    const foundCommits: CommitWithSource[] = []
     const notFoundIds: string[] = []
 
     for (const taskId of taskIds) {
-      const foundCommit = evalData.evalCommits.find((c) => c.id === taskId)
-      if (foundCommit) {
-        foundCommits.push(foundCommit)
+      const found = allCommitsWithSource.find((c) => c.commit.id === taskId)
+      if (found) {
+        foundCommits.push(found)
       } else {
         notFoundIds.push(taskId)
       }
     }
 
     if (notFoundIds.length > 0) {
-      const availableIds = evalData.evalCommits.map((c) => c.id).join(', ')
+      const availableIds = allCommitsWithSource
+        .map((c) => c.commit.id)
+        .join(', ')
       throw new Error(
         `Task ID(s) not found: ${notFoundIds.join(', ')}. Available task IDs: ${availableIds}`,
       )
@@ -313,7 +378,7 @@ export async function runBuffBench(options: {
     commitsToRun = foundCommits
     console.log(`Running ${foundCommits.length} task(s): ${taskIds.join(', ')}`)
   } else {
-    commitsToRun = evalData.evalCommits
+    commitsToRun = allCommitsWithSource
   }
 
   const client =
@@ -367,8 +432,11 @@ export async function runBuffBench(options: {
 
   const commitLimit = pLimit(taskConcurrency)
 
-  const commitPromises = commitsToRun.map((commit, index) =>
-    commitLimit(() =>
+  const commitPromises = commitsToRun.map(({ commit, evalData }, index) => {
+    // Merge binaries env with this eval's env
+    const mergedEnv = { ...binsEnv, ...evalData.env }
+
+    return commitLimit(() =>
       runTask({
         client,
         commit,
@@ -384,9 +452,10 @@ export async function runBuffBench(options: {
         extractLessons,
         printEvents: agents.length === 1 && taskConcurrency === 1,
         finalCheckCommands: evalData.finalCheckCommands,
+        disableAnalysis,
       }),
-    ),
-  )
+    )
+  })
 
   const commitResults = await Promise.allSettled(commitPromises)
 
@@ -411,7 +480,7 @@ export async function runBuffBench(options: {
     }
   }
 
-  for (const [_agentId, agentData] of Object.entries(results)) {
+  for (const agentData of Object.values(results)) {
     // Filter out runs from commits where ANY agent had an error
     const validRuns = agentData.runs.filter(
       (r) => !commitShasWithErrors.has(r.commitSha),
@@ -448,47 +517,54 @@ export async function runBuffBench(options: {
 
   const logFiles = fs.readdirSync(logsDir)
 
-  const metaAnalysis = await analyzeAllTasks({
-    client,
-    logsDir,
-    agents,
-    analyzerContext,
-  })
+  const metaAnalysis = disableAnalysis
+    ? undefined
+    : await analyzeAllTasks({
+        client,
+        logsDir,
+        agents,
+        analyzerContext,
+      })
 
-  // Print meta-analysis results
-  console.log('\n=== Meta-Analysis Results ===')
-  console.log('\nOverall Comparison:')
-  console.log(metaAnalysis.overallComparison)
+  if (metaAnalysis) {
+    // Print meta-analysis results
+    console.log('\n=== Meta-Analysis Results ===')
+    console.log('\nOverall Comparison:')
+    console.log(metaAnalysis.overallComparison)
 
-  if (metaAnalysis.agentInsights.length > 0) {
-    console.log('\nAgent-Specific Insights:')
-    for (const insight of metaAnalysis.agentInsights) {
-      console.log(`\n[${insight.agentId}]`)
-      if (insight.consistentStrengths.length > 0) {
-        console.log('  Strengths:', insight.consistentStrengths.join(', '))
-      }
-      if (insight.consistentWeaknesses.length > 0) {
-        console.log('  Weaknesses:', insight.consistentWeaknesses.join(', '))
+    if (metaAnalysis.agentInsights.length > 0) {
+      console.log('\nAgent-Specific Insights:')
+      for (const insight of metaAnalysis.agentInsights) {
+        console.log(`\n[${insight.agentId}]`)
+        if (insight.consistentStrengths.length > 0) {
+          console.log('  Strengths:', insight.consistentStrengths.join(', '))
+        }
+        if (insight.consistentWeaknesses.length > 0) {
+          console.log('  Weaknesses:', insight.consistentWeaknesses.join(', '))
+        }
       }
     }
-  }
 
-  if (metaAnalysis.keyFindings.length > 0) {
-    console.log('\nKey Findings:')
-    metaAnalysis.keyFindings.forEach((finding, i) => {
-      console.log(`  ${i + 1}. ${finding}`)
-    })
+    if (metaAnalysis.keyFindings.length > 0) {
+      console.log('\nKey Findings:')
+      metaAnalysis.keyFindings.forEach((finding, i) => {
+        console.log(`  ${i + 1}. ${finding}`)
+      })
+    }
   }
 
   const finalResults = {
     metadata: {
       timestamp: new Date().toISOString(),
-      evalDataPath,
+      evalDataPaths,
       agentsTested: agents,
       commitsEvaluated: commitsToRun.length,
-      totalCommitsInEval: evalData.evalCommits.length,
-      repoUrl: evalData.repoUrl,
-      initCommand: evalData.initCommand,
+      totalCommitsInEval: allCommitsWithSource.length,
+      evalFiles: loadedEvalFiles.map((f) => ({
+        path: f.path,
+        repoUrl: f.data.repoUrl,
+        taskCount: f.data.evalCommits.length,
+      })),
       totalDuration: Date.now() - startTime,
       logsDirectory: logsDir,
       files: logFiles,

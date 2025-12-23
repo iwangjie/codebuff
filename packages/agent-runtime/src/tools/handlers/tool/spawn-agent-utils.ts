@@ -4,14 +4,19 @@ import { generateCompactId } from '@codebuff/common/util/string'
 
 import { loopAgentSteps } from '../../../run-agent-step'
 import { getAgentTemplate } from '../../../templates/agent-registry'
+import { filterUnfinishedToolCalls, withSystemTags } from '../../../util/messages'
 
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
+import type {
+  AgentRuntimeDeps,
+  AgentRuntimeScopedDeps,
+} from '@codebuff/common/types/contracts/agent-runtime'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 import type {
   ParamsExcluding,
   OptionalFields,
 } from '@codebuff/common/types/function-params'
-import type { Message } from '@codebuff/common/types/messages/codebuff-message'
+import type { ToolSet } from 'ai'
 import type { PrintModeEvent } from '@codebuff/common/types/print-mode'
 import type {
   AgentState,
@@ -19,82 +24,76 @@ import type {
   Subgoal,
 } from '@codebuff/common/types/session-state'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
-
-export interface SpawnAgentParams {
-  agent_type: string
-  prompt?: string
-  params?: any
-}
-
-export interface BaseSpawnState {
-  fingerprintId?: string
-  userId?: string
-  agentTemplate?: AgentTemplate
-  localAgentTemplates?: Record<string, AgentTemplate>
-  messages?: Message[]
-  agentState?: AgentState
-  system?: string
-}
-
-export interface SpawnContext {
-  fileContext: ProjectFileContext
-  clientSessionId: string
-  userInputId: string
-  getLatestState: () => { messages: Message[] }
-}
+import { Message } from '@codebuff/common/types/messages/codebuff-message'
 
 /**
- * Validates that all required state is present for spawning agents
+ * Common context params needed for spawning subagents.
+ * These are the params that don't change between different spawn calls
+ * and are passed through from the parent agent runtime.
  */
-export function validateSpawnState(
-  state: BaseSpawnState,
-  toolName: string,
-): Omit<Required<BaseSpawnState>, 'userId'> & { userId: string | undefined } {
-  const {
-    fingerprintId,
-    agentTemplate: parentAgentTemplate,
-    localAgentTemplates,
-    messages,
-    agentState,
-    userId,
-    system,
-  } = state
-
-  if (!fingerprintId) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing fingerprintId in state`,
-    )
-  }
-  if (!parentAgentTemplate) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing agentTemplate in state`,
-    )
-  }
-  if (!messages) {
-    throw new Error(`Internal error for ${toolName}: Missing messages in state`)
-  }
-  if (!agentState) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing agentState in state`,
-    )
-  }
-  if (!localAgentTemplates) {
-    throw new Error(
-      `Internal error for ${toolName}: Missing localAgentTemplates in state`,
-    )
-  }
-  if (!system) {
-    throw new Error(`Internal error for ${toolName}: Missing system in state`)
+export type SubagentContextParams = AgentRuntimeDeps &
+  AgentRuntimeScopedDeps & {
+    clientSessionId: string
+    fileContext: ProjectFileContext
+    localAgentTemplates: Record<string, AgentTemplate>
+    repoId: string | undefined
+    repoUrl: string | undefined
+    signal: AbortSignal
+    userId: string | undefined
   }
 
+/**
+ * Extracts the common context params needed for spawning subagents.
+ * This avoids bugs from spreading all params with `...params` which can
+ * accidentally pass through params that should be overridden.
+ */
+export function extractSubagentContextParams(
+  params: SubagentContextParams,
+): SubagentContextParams {
   return {
-    fingerprintId,
-    userId,
-    agentTemplate: parentAgentTemplate,
-    localAgentTemplates,
-    messages,
-    agentState,
-    system,
+    // AgentRuntimeDeps - Environment
+    clientEnv: params.clientEnv,
+    ciEnv: params.ciEnv,
+    // AgentRuntimeDeps - Database
+    getUserInfoFromApiKey: params.getUserInfoFromApiKey,
+    fetchAgentFromDatabase: params.fetchAgentFromDatabase,
+    startAgentRun: params.startAgentRun,
+    finishAgentRun: params.finishAgentRun,
+    addAgentStep: params.addAgentStep,
+    // AgentRuntimeDeps - Billing
+    consumeCreditsWithFallback: params.consumeCreditsWithFallback,
+    // AgentRuntimeDeps - LLM
+    promptAiSdkStream: params.promptAiSdkStream,
+    promptAiSdk: params.promptAiSdk,
+    promptAiSdkStructured: params.promptAiSdkStructured,
+    // AgentRuntimeDeps - Mutable State
+    databaseAgentCache: params.databaseAgentCache,
+    liveUserInputRecord: params.liveUserInputRecord,
+    sessionConnections: params.sessionConnections,
+    // AgentRuntimeDeps - Analytics
+    trackEvent: params.trackEvent,
+    // AgentRuntimeDeps - Other
+    logger: params.logger,
+    fetch: params.fetch,
+
+    // AgentRuntimeScopedDeps - Client (WebSocket)
+    handleStepsLogChunk: params.handleStepsLogChunk,
+    requestToolCall: params.requestToolCall,
+    requestMcpToolData: params.requestMcpToolData,
+    requestFiles: params.requestFiles,
+    requestOptionalFile: params.requestOptionalFile,
+    sendAction: params.sendAction,
+    sendSubagentChunk: params.sendSubagentChunk,
+    apiKey: params.apiKey,
+
+    // Core context params
+    clientSessionId: params.clientSessionId,
+    fileContext: params.fileContext,
+    localAgentTemplates: params.localAgentTemplates,
+    repoId: params.repoId,
+    repoUrl: params.repoUrl,
+    signal: params.signal,
+    userId: params.userId,
   }
 }
 
@@ -170,8 +169,7 @@ export async function validateAndGetAgentTemplate(
     logger: Logger
   } & ParamsExcluding<typeof getAgentTemplate, 'agentId'>,
 ): Promise<{ agentTemplate: AgentTemplate; agentType: string }> {
-  const { agentTypeStr, parentAgentTemplate, localAgentTemplates, logger } =
-    params
+  const { agentTypeStr, parentAgentTemplate } = params
   const agentTemplate = await getAgentTemplate({
     ...params,
     agentId: agentTypeStr,
@@ -212,7 +210,7 @@ export function validateAgentInput(
 
   // Validate prompt requirement
   if (inputSchema.prompt) {
-    const result = inputSchema.prompt.safeParse(prompt)
+    const result = inputSchema.prompt.safeParse(prompt ?? '')
     if (!result.success) {
       throw new Error(
         `Invalid prompt for agent ${agentType}: ${JSON.stringify(result.error.issues, null, 2)}`,
@@ -238,14 +236,28 @@ export function createAgentState(
   agentType: string,
   agentTemplate: AgentTemplate,
   parentAgentState: AgentState,
-  parentMessageHistory: Message[],
   agentContext: Record<string, Subgoal>,
 ): AgentState {
   const agentId = generateCompactId()
 
-  const messageHistory = agentTemplate.includeMessageHistory
-    ? parentMessageHistory
-    : []
+  // When including message history, filter out any tool calls that don't have
+  // corresponding tool responses. This prevents the spawned agent from seeing
+  // unfinished tool calls which throw errors in the Anthropic API.
+  let messageHistory: Message[] = []
+
+  if (agentTemplate.includeMessageHistory) {
+    messageHistory = filterUnfinishedToolCalls(parentAgentState.messageHistory)
+    messageHistory.push({
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: withSystemTags(`Subagent ${agentType} has been spawned.`),
+        },
+      ],
+      tags: ['SUBAGENT_SPAWN'],
+    })
+  }
 
   return {
     agentId,
@@ -263,6 +275,8 @@ export function createAgentState(
     directCreditsUsed: 0,
     output: undefined,
     parentId: parentAgentState.agentId,
+    systemPrompt: '',
+    toolDefinitions: {},
   }
 }
 
@@ -309,9 +323,11 @@ export async function executeSubagent(
     {
       agentTemplate: AgentTemplate
       parentAgentState: AgentState
+      parentTools?: ToolSet
       onResponseChunk: (chunk: string | PrintModeEvent) => void
       isOnlyChild?: boolean
-    } & ParamsExcluding<typeof loopAgentSteps, 'agentType'>,
+      ancestorRunIds: string[]
+    } & ParamsExcluding<typeof loopAgentSteps, 'agentType' | 'ancestorRunIds'>,
     'isOnlyChild' | 'clearUserPromptMessagesAfterResponse'
   >,
 ) {
@@ -320,8 +336,15 @@ export async function executeSubagent(
     clearUserPromptMessagesAfterResponse: true,
     ...options,
   }
-  const { onResponseChunk, agentTemplate, parentAgentState, isOnlyChild } =
-    withDefaults
+  const {
+    onResponseChunk,
+    agentTemplate,
+    parentAgentState,
+    isOnlyChild,
+    ancestorRunIds,
+    prompt,
+    spawnParams,
+  } = withDefaults
 
   const startEvent = {
     type: 'subagent_start' as const,
@@ -330,11 +353,18 @@ export async function executeSubagent(
     displayName: agentTemplate.displayName,
     onlyChild: isOnlyChild,
     parentAgentId: parentAgentState.agentId,
+    prompt,
+    params: spawnParams,
   }
   onResponseChunk(startEvent)
 
   const result = await loopAgentSteps({
     ...withDefaults,
+    // Don't propagate parent's image content to subagents.
+    // If subagents need to see images, they get them through includeMessageHistory,
+    // not by creating new image-containing messages for their prompts.
+    content: undefined,
+    ancestorRunIds: [...ancestorRunIds, parentAgentState.runId ?? ''],
     agentType: agentTemplate.id,
   })
 
@@ -345,6 +375,8 @@ export async function executeSubagent(
     displayName: agentTemplate.displayName,
     onlyChild: isOnlyChild,
     parentAgentId: parentAgentState.agentId,
+    prompt,
+    params: spawnParams,
   })
 
   if (result.agentState.runId) {

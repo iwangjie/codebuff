@@ -4,9 +4,9 @@ import { runBuffBench } from './run-buffbench'
 
 async function main() {
   await runBuffBench({
-    evalDataPath: path.join(__dirname, 'eval-codebuff.json'),
-    agents: ['base2-fast'],
-    taskIds: ['add-spawn-perms-tests'],
+    evalDataPaths: [path.join(__dirname, 'eval-codebuff.json')],
+    agents: ['base2'],
+    taskIds: ['filter-system-history'],
   })
 
   process.exit(0)

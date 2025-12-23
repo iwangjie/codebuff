@@ -9,6 +9,9 @@ import {
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { cloneDeep } from 'lodash'
+import z from 'zod/v4'
+
+import { loadLocalAgents } from './agents/load-agents'
 
 import type { CustomToolDefinition } from './custom-tool'
 import type { AgentDefinition } from '@codebuff/common/templates/initial-agents-dir/types/agent-definition'
@@ -19,6 +22,7 @@ import type {
   AgentOutput,
   SessionState,
 } from '@codebuff/common/types/session-state'
+import type { CodebuffSpawn } from '@codebuff/common/types/spawn'
 import type {
   CustomToolDefinitions,
   FileTreeNode,
@@ -26,7 +30,7 @@ import type {
 import type * as fsType from 'fs'
 
 export type RunState = {
-  sessionState: SessionState
+  sessionState?: SessionState
   output: AgentOutput
 }
 
@@ -38,6 +42,7 @@ export type InitialSessionStateOptions = {
   customToolDefinitions?: CustomToolDefinition[]
   maxAgentSteps?: number
   fs?: CodebuffFileSystem
+  spawn?: CodebuffSpawn
   logger?: Logger
 }
 
@@ -64,24 +69,31 @@ function processAgentDefinitions(
 }
 
 /**
- * Processes custom tool definitions into the format expected by SessionState
+ * Processes custom tool definitions into the format expected by SessionState.
+ * Converts Zod schemas to JSON Schema format so they can survive JSON serialization.
  */
 function processCustomToolDefinitions(
   customToolDefinitions: CustomToolDefinition[],
-): Record<
-  string,
-  Pick<CustomToolDefinition, keyof NonNullable<CustomToolDefinitions>[string]>
-> {
+): CustomToolDefinitions {
   return Object.fromEntries(
-    customToolDefinitions.map((toolDefinition) => [
-      toolDefinition.toolName,
-      {
-        inputJsonSchema: toolDefinition.inputJsonSchema,
-        description: toolDefinition.description,
-        endsAgentStep: toolDefinition.endsAgentStep,
-        exampleInputs: toolDefinition.exampleInputs,
-      },
-    ]),
+    customToolDefinitions.map((toolDefinition) => {
+      // Convert Zod schema to JSON Schema format so it survives JSON serialization
+      // The agent-runtime will wrap this with AI SDK's jsonSchema() helper
+      const jsonSchema = z.toJSONSchema(toolDefinition.inputSchema, {
+        io: 'input',
+      }) as Record<string, unknown>
+      delete jsonSchema['$schema']
+
+      return [
+        toolDefinition.toolName,
+        {
+          inputSchema: jsonSchema,
+          description: toolDefinition.description,
+          endsAgentStep: toolDefinition.endsAgentStep,
+          exampleInputs: toolDefinition.exampleInputs,
+        },
+      ]
+    }),
   )
 }
 
@@ -117,6 +129,99 @@ async function computeProjectIndex(
   }
 
   return { fileTree, fileTokenScores, tokenCallers }
+}
+
+/**
+ * Helper to convert ChildProcess to Promise with stdout/stderr
+ */
+function childProcessToPromise(
+  proc: ReturnType<CodebuffSpawn>,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    let stdout = ''
+    let stderr = ''
+
+    proc.stdout?.on('data', (data: Buffer) => {
+      stdout += data.toString()
+    })
+
+    proc.stderr?.on('data', (data: Buffer) => {
+      stderr += data.toString()
+    })
+
+    proc.on('close', (code: number | null) => {
+      if (code === 0) {
+        resolve({ stdout, stderr })
+      } else {
+        reject(new Error(`Command exited with code ${code}`))
+      }
+    })
+
+    proc.on('error', reject)
+  })
+}
+
+/**
+ * Retrieves git changes for the project using the provided spawn function
+ */
+async function getGitChanges(params: {
+  cwd: string
+  spawn: CodebuffSpawn
+  logger: Logger
+}): Promise<{
+  status: string
+  diff: string
+  diffCached: string
+  lastCommitMessages: string
+}> {
+  const { cwd, spawn, logger } = params
+
+  const status = childProcessToPromise(spawn('git', ['status'], { cwd }))
+    .then(({ stdout }) => stdout)
+    .catch((error) => {
+      logger.debug?.({ error }, 'Failed to get git status')
+      return ''
+    })
+
+  const diff = childProcessToPromise(spawn('git', ['diff'], { cwd }))
+    .then(({ stdout }) => stdout)
+    .catch((error) => {
+      logger.debug?.({ error }, 'Failed to get git diff')
+      return ''
+    })
+
+  const diffCached = childProcessToPromise(
+    spawn('git', ['diff', '--cached'], { cwd }),
+  )
+    .then(({ stdout }) => stdout)
+    .catch((error) => {
+      logger.debug?.({ error }, 'Failed to get git diff --cached')
+      return ''
+    })
+
+  const lastCommitMessages = childProcessToPromise(
+    spawn('git', ['shortlog', 'HEAD~10..HEAD'], { cwd }),
+  )
+    .then(({ stdout }) =>
+      stdout
+        .trim()
+        .split('\n')
+        .slice(1)
+        .reverse()
+        .map((line) => line.trim())
+        .join('\n'),
+    )
+    .catch((error) => {
+      logger.debug?.({ error }, 'Failed to get lastCommitMessages')
+      return ''
+    })
+
+  return {
+    status: await status,
+    diff: await diff,
+    diffCached: await diffCached,
+    lastCommitMessages: await lastCommitMessages,
+  }
 }
 
 /**
@@ -160,20 +265,63 @@ async function discoverProjectFiles(params: {
 }
 
 /**
- * Auto-derives knowledge files from project files if knowledgeFiles is undefined
+ * Selects knowledge files from a list of file paths with fallback logic.
+ * For each directory, checks for knowledge.md first, then AGENTS.md, then CLAUDE.md.
+ * @internal Exported for testing
+ */
+export function selectKnowledgeFilePaths(allFilePaths: string[]): string[] {
+  const knowledgeCandidates = allFilePaths.filter((filePath) => {
+    const lowercaseFilePath = filePath.toLowerCase()
+    return (
+      lowercaseFilePath.endsWith('knowledge.md') ||
+      lowercaseFilePath.endsWith('agents.md') ||
+      lowercaseFilePath.endsWith('claude.md')
+    )
+  })
+
+  // Group candidates by directory
+  const byDirectory = new Map<string, string[]>()
+  for (const filePath of knowledgeCandidates) {
+    const dir = path.dirname(filePath)
+    if (!byDirectory.has(dir)) {
+      byDirectory.set(dir, [])
+    }
+    byDirectory.get(dir)!.push(filePath)
+  }
+
+  const selectedFiles: string[] = []
+
+  // For each directory, select one knowledge file using fallback priority
+  for (const files of byDirectory.values()) {
+    const knowledgeMd = files.find((f) =>
+      f.toLowerCase().endsWith('knowledge.md'),
+    )
+    const agentsMd = files.find((f) => f.toLowerCase().endsWith('agents.md'))
+    const claudeMd = files.find((f) => f.toLowerCase().endsWith('claude.md'))
+
+    // Priority: knowledge.md > AGENTS.md > CLAUDE.md
+    const selectedKnowledgeFile = knowledgeMd || agentsMd || claudeMd
+    if (selectedKnowledgeFile) {
+      selectedFiles.push(selectedKnowledgeFile)
+    }
+  }
+
+  return selectedFiles
+}
+
+/**
+ * Auto-derives knowledge files from project files if knowledgeFiles is undefined.
+ * Implements fallback priority: knowledge.md > AGENTS.md > CLAUDE.md per directory.
  */
 function deriveKnowledgeFiles(
   projectFiles: Record<string, string>,
 ): Record<string, string> {
+  const allFilePaths = Object.keys(projectFiles)
+  const selectedFilePaths = selectKnowledgeFilePaths(allFilePaths)
+
   const knowledgeFiles: Record<string, string> = {}
-  for (const [filePath, fileContents] of Object.entries(projectFiles)) {
-    const lowercasePathName = filePath.toLowerCase()
-    if (
-      lowercasePathName.endsWith('knowledge.md') ||
-      lowercasePathName.endsWith('claude.md')
-    ) {
-      knowledgeFiles[filePath] = fileContents
-    }
+  for (const filePath of selectedFilePaths) {
+    knowledgeFiles[filePath] = projectFiles[filePath]
   }
   return knowledgeFiles
 }
@@ -188,6 +336,7 @@ export async function initialSessionState(
     projectFiles,
     knowledgeFiles,
     fs,
+    spawn,
     logger,
   } = params
   if (!agentDefinitions) {
@@ -196,14 +345,12 @@ export async function initialSessionState(
   if (!customToolDefinitions) {
     customToolDefinitions = []
   }
-  if (!projectFiles) {
-    projectFiles = {}
-  }
-  if (!knowledgeFiles) {
-    knowledgeFiles = {}
-  }
   if (!fs) {
     fs = (require('fs') as typeof fsType).promises
+  }
+  if (!spawn) {
+    const { spawn: nodeSpawn } = require('child_process')
+    spawn = nodeSpawn as CodebuffSpawn
   }
   if (!logger) {
     logger = {
@@ -218,13 +365,16 @@ export async function initialSessionState(
   if (projectFiles === undefined && cwd) {
     projectFiles = await discoverProjectFiles({ cwd, fs, logger })
   }
-  logger.info({ projectFiles }, 'asdf')
   if (knowledgeFiles === undefined) {
     knowledgeFiles = projectFiles ? deriveKnowledgeFiles(projectFiles) : {}
   }
-  logger.info({ knowledgeFiles }, 'asdf')
 
-  const processedAgentTemplates = processAgentDefinitions(agentDefinitions)
+  let processedAgentTemplates: Record<string, any> = {}
+  if (agentDefinitions && agentDefinitions.length > 0) {
+    processedAgentTemplates = processAgentDefinitions(agentDefinitions)
+  } else {
+    processedAgentTemplates = await loadLocalAgents({ verbose: false })
+  }
   const processedCustomToolDefinitions = processCustomToolDefinitions(
     customToolDefinitions,
   )
@@ -241,6 +391,16 @@ export async function initialSessionState(
     tokenCallers = result.tokenCallers
   }
 
+  // Gather git changes if cwd is available
+  const gitChanges = cwd
+    ? await getGitChanges({ cwd, spawn, logger })
+    : {
+        status: '',
+        diff: '',
+        diffCached: '',
+        lastCommitMessages: '',
+      }
+
   const initialState = getInitialSessionState({
     projectRoot: cwd ?? process.cwd(),
     cwd: cwd ?? process.cwd(),
@@ -251,12 +411,7 @@ export async function initialSessionState(
     userKnowledgeFiles: {},
     agentTemplates: processedAgentTemplates,
     customToolDefinitions: processedCustomToolDefinitions,
-    gitChanges: {
-      status: '',
-      diff: '',
-      diffCached: '',
-      lastCommitMessages: '',
-    },
+    gitChanges,
     changesSinceLastChat: {},
     shellConfigFiles: {},
     systemInfo: {
@@ -319,7 +474,9 @@ export function withAdditionalMessage({
 }): RunState {
   const newRunState = cloneDeep(runState)
 
-  newRunState.sessionState.mainAgentState.messageHistory.push(message)
+  if (newRunState.sessionState) {
+    newRunState.sessionState.mainAgentState.messageHistory.push(message)
+  }
 
   return newRunState
 }
@@ -334,7 +491,9 @@ export function withMessageHistory({
   // Deep copy
   const newRunState = JSON.parse(JSON.stringify(runState)) as typeof runState
 
-  newRunState.sessionState.mainAgentState.messageHistory = messages
+  if (newRunState.sessionState) {
+    newRunState.sessionState.mainAgentState.messageHistory = messages
+  }
 
   return newRunState
 }

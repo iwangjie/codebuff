@@ -1,6 +1,8 @@
 import React from 'react'
 import stringWidth from 'string-width'
 
+import { Button } from './button'
+
 type PillSegment = {
   text: string
   fg?: string
@@ -55,14 +57,14 @@ export const RaisedPill = ({
   const horizontal = buildHorizontal(contentWidth)
 
   return (
-    <box
+    <Button
       style={{
         flexDirection: 'column',
         gap: 0,
         backgroundColor: 'transparent',
         ...style,
       }}
-      onMouseDown={onPress}
+      onClick={onPress}
     >
       <text>
         <span fg={frameColor}>{`╭${horizontal}╮`}</span>
@@ -88,6 +90,6 @@ export const RaisedPill = ({
       <text>
         <span fg={frameColor}>{`╰${horizontal}╯`}</span>
       </text>
-    </box>
+    </Button>
   )
 }

@@ -11,16 +11,17 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
 interface PublisherPageProps {
-  params: {
+  params: Promise<{
     id: string
-  }
+  }>
 }
 
 export async function generateMetadata({ params }: PublisherPageProps) {
+  const { id } = await params
   const publisher = await db
     .select()
     .from(schema.publisher)
-    .where(eq(schema.publisher.id, params.id))
+    .where(eq(schema.publisher.id, id))
     .limit(1)
 
   if (publisher.length === 0) {
@@ -29,11 +30,23 @@ export async function generateMetadata({ params }: PublisherPageProps) {
     }
   }
 
+  const title = `${publisher[0].name} - Codebuff Publisher`
+  const description =
+    publisher[0].bio ||
+    `View ${publisher[0].name}'s published agents on Codebuff`
+  const ogImages = (
+    publisher[0].avatar_url ? [publisher[0].avatar_url] : []
+  ) as string[]
+
   return {
-    title: `${publisher[0].name} - Codebuff Publisher`,
-    description:
-      publisher[0].bio ||
-      `View ${publisher[0].name}'s published agents on Codebuff`,
+    title,
+    description,
+    openGraph: {
+      title,
+      description,
+      type: 'profile',
+      images: ogImages,
+    },
   }
 }
 
@@ -51,10 +64,11 @@ type GroupedAgent = {
 }
 
 const PublisherPage = async ({ params }: PublisherPageProps) => {
+  const { id } = await params
   const publisher = await db
     .select()
     .from(schema.publisher)
-    .where(eq(schema.publisher.id, params.id))
+    .where(eq(schema.publisher.id, id))
     .limit(1)
 
   if (publisher.length === 0) {

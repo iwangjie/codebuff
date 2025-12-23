@@ -3,6 +3,7 @@ import z from 'zod/v4'
 import { FileChangeSchema } from '../actions'
 import { addMessageParams } from './params/tool/add-message'
 import { addSubgoalParams } from './params/tool/add-subgoal'
+import { askUserParams } from './params/tool/ask-user'
 import { browserLogsParams } from './params/tool/browser-logs'
 import { codeSearchParams } from './params/tool/code-search'
 import { createPlanParams } from './params/tool/create-plan'
@@ -11,6 +12,8 @@ import { findFilesParams } from './params/tool/find-files'
 import { globParams } from './params/tool/glob'
 import { listDirectoryParams } from './params/tool/list-directory'
 import { lookupAgentInfoParams } from './params/tool/lookup-agent-info'
+import { proposeStrReplaceParams } from './params/tool/propose-str-replace'
+import { proposeWriteFileParams } from './params/tool/propose-write-file'
 import { readDocsParams } from './params/tool/read-docs'
 import { readFilesParams } from './params/tool/read-files'
 import { readSubtreeParams } from './params/tool/read-subtree'
@@ -21,6 +24,7 @@ import { setOutputParams } from './params/tool/set-output'
 import { spawnAgentInlineParams } from './params/tool/spawn-agent-inline'
 import { spawnAgentsParams } from './params/tool/spawn-agents'
 import { strReplaceParams } from './params/tool/str-replace'
+import { suggestFollowupsParams } from './params/tool/suggest-followups'
 import { taskCompletedParams } from './params/tool/task-completed'
 import { thinkDeeplyParams } from './params/tool/think-deeply'
 import { updateSubgoalParams } from './params/tool/update-subgoal'
@@ -28,21 +32,14 @@ import { webSearchParams } from './params/tool/web-search'
 import { writeFileParams } from './params/tool/write-file'
 import { writeTodosParams } from './params/tool/write-todos'
 
-import type {
-  $ToolParams,
-  $ToolResults,
-  PublishedToolName,
-  ToolName,
-} from './constants'
+import type { $ToolParams, PublishedToolName, ToolName } from './constants'
 import type { ToolMessage } from '../types/messages/codebuff-message'
-import type {
-  ToolCallPart,
-  ToolResultPart,
-} from '../types/messages/content-part'
+import type { ToolCallPart } from '../types/messages/content-part'
 
-export const $toolParams = {
+export const toolParams = {
   add_message: addMessageParams,
   add_subgoal: addSubgoalParams,
+  ask_user: askUserParams,
   browser_logs: browserLogsParams,
   code_search: codeSearchParams,
   create_plan: createPlanParams,
@@ -51,6 +48,8 @@ export const $toolParams = {
   glob: globParams,
   list_directory: listDirectoryParams,
   lookup_agent_info: lookupAgentInfoParams,
+  propose_str_replace: proposeStrReplaceParams,
+  propose_write_file: proposeWriteFileParams,
   read_docs: readDocsParams,
   read_files: readFilesParams,
   read_subtree: readSubtreeParams,
@@ -61,6 +60,7 @@ export const $toolParams = {
   spawn_agents: spawnAgentsParams,
   spawn_agent_inline: spawnAgentInlineParams,
   str_replace: strReplaceParams,
+  suggest_followups: suggestFollowupsParams,
   task_completed: taskCompletedParams,
   think_deeply: thinkDeeplyParams,
   update_subgoal: updateSubgoalParams,
@@ -71,51 +71,37 @@ export const $toolParams = {
   [K in ToolName]: $ToolParams<K>
 }
 
-export const additionalToolResultSchemas = {
-  // None for now!
-} satisfies Record<string, $ToolResults>
-type ResultOnlyToolName = keyof typeof additionalToolResultSchemas
-
-// Tool call from LLM
+// Tool call from LLM after parsing
 export type CodebuffToolCall<T extends ToolName = ToolName> = {
   [K in ToolName]: {
     toolName: K
-    input: z.infer<(typeof $toolParams)[K]['parameters']>
+    input: z.infer<(typeof toolParams)[K]['inputSchema']>
   } & Omit<ToolCallPart, 'type'>
 }[T]
 
-export type CodebuffToolOutput<
-  T extends ToolName | ResultOnlyToolName = ToolName,
-> = {
-  [K in ToolName | ResultOnlyToolName]: K extends ToolName
-    ? z.infer<(typeof $toolParams)[K]['outputs']>
-    : K extends ResultOnlyToolName
-      ? z.infer<(typeof additionalToolResultSchemas)[K]['outputs']>
-      : never
-}[T]
-export type CodebuffToolResult<
-  T extends ToolName | ResultOnlyToolName = ToolName,
-> = {
-  [K in ToolName | ResultOnlyToolName]: {
-    toolName: K
-    output: CodebuffToolOutput<K>
-  } & Omit<ToolResultPart, 'type'>
+export type CodebuffToolOutput<T extends ToolName = ToolName> = {
+  [K in ToolName]: K extends ToolName
+    ? z.infer<(typeof toolParams)[K]['outputSchema']>
+    : never
 }[T]
 
-export type CodebuffToolMessage<
-  T extends ToolName | ResultOnlyToolName = ToolName,
-> = ToolMessage & { content: CodebuffToolResult<T> }
+export type CodebuffToolMessage<T extends ToolName = ToolName> = ToolMessage & {
+  content: CodebuffToolOutput<T>
+}
 
 // Tool call to send to client
-export type ClientToolName = (typeof clientToolNames)[number]
 export const clientToolCallSchema = z.discriminatedUnion('toolName', [
   z.object({
+    toolName: z.literal('ask_user'),
+    input: toolParams.ask_user.inputSchema,
+  }),
+  z.object({
     toolName: z.literal('browser_logs'),
-    input: $toolParams.browser_logs.parameters,
+    input: toolParams.browser_logs.inputSchema,
   }),
   z.object({
     toolName: z.literal('code_search'),
-    input: $toolParams.code_search.parameters,
+    input: toolParams.code_search.inputSchema,
   }),
   z.object({
     toolName: z.literal('create_plan'),
@@ -123,19 +109,19 @@ export const clientToolCallSchema = z.discriminatedUnion('toolName', [
   }),
   z.object({
     toolName: z.literal('glob'),
-    input: $toolParams.glob.parameters,
+    input: toolParams.glob.inputSchema,
   }),
   z.object({
     toolName: z.literal('list_directory'),
-    input: $toolParams.list_directory.parameters,
+    input: toolParams.list_directory.inputSchema,
   }),
   z.object({
     toolName: z.literal('run_file_change_hooks'),
-    input: $toolParams.run_file_change_hooks.parameters,
+    input: toolParams.run_file_change_hooks.inputSchema,
   }),
   z.object({
     toolName: z.literal('run_terminal_command'),
-    input: $toolParams.run_terminal_command.parameters.and(
+    input: toolParams.run_terminal_command.inputSchema.and(
       z.object({ mode: z.enum(['assistant', 'user']) }),
     ),
   }),
@@ -151,9 +137,12 @@ export const clientToolCallSchema = z.discriminatedUnion('toolName', [
 export const clientToolNames = clientToolCallSchema.def.options.map(
   (opt) => opt.shape.toolName.value,
 ) satisfies ToolName[]
+export type ClientToolName = (typeof clientToolNames)[number]
 
-export type ClientToolCall<T extends ClientToolName = ClientToolName> = z.infer<
-  typeof clientToolCallSchema
-> & { toolName: T } & Omit<ToolCallPart, 'type'>
+export type ClientToolCall<T extends ClientToolName = ClientToolName> = Extract<
+  z.infer<typeof clientToolCallSchema>,
+  { toolName: T }
+> &
+  Pick<ToolCallPart, 'toolCallId' | 'toolName' | 'input' | 'providerOptions'>
 
 export type PublishedClientToolName = ClientToolName & PublishedToolName

@@ -1,11 +1,11 @@
-import React from 'react'
-
 import { describe, test, expect } from 'bun:test'
+import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
-import { MessageBlock } from '../message-block'
-import '../../state/theme-store' // Initialize theme store
+import { initializeThemeStore } from '../../hooks/use-theme'
 import { chatThemes, createMarkdownPalette } from '../../utils/theme-system'
+import { MessageBlock } from '../message-block'
+
 import type { MarkdownPalette } from '../../utils/markdown-renderer'
 
 const theme = chatThemes.dark
@@ -37,16 +37,17 @@ const baseProps = {
   availableWidth: 80,
   markdownPalette: basePalette,
   collapsedAgents: new Set<string>(),
+  autoCollapsedAgents: new Set<string>(),
   streamingAgents: new Set<string>(),
   onToggleCollapsed: () => {},
+  onBuildFast: () => {},
+  onBuildMax: () => {},
+  setCollapsedAgents: () => {},
+  addAutoCollapsedAgent: () => {},
 }
 
-const createTimer = (elapsedSeconds: number) => ({
-  start: () => {},
-  stop: () => {},
-  elapsedSeconds,
-  startTime: elapsedSeconds > 0 ? Date.now() - elapsedSeconds * 1000 : null,
-})
+const createTimerStartTime = (elapsedSeconds: number): number | null =>
+  elapsedSeconds > 0 ? Date.now() - elapsedSeconds * 1000 : null
 
 describe('MessageBlock streaming indicator', () => {
   test('shows elapsed seconds while streaming', () => {
@@ -54,7 +55,7 @@ describe('MessageBlock streaming indicator', () => {
       <MessageBlock
         {...baseProps}
         isLoading={true}
-        timer={createTimer(4)}
+        timerStartTime={createTimerStartTime(4)}
       />,
     )
 
@@ -66,10 +67,11 @@ describe('MessageBlock streaming indicator', () => {
       <MessageBlock
         {...baseProps}
         isLoading={true}
-        timer={createTimer(0)}
+        timerStartTime={createTimerStartTime(0)}
       />,
     )
 
     expect(markup).not.toContain('0s')
   })
 })
+initializeThemeStore()

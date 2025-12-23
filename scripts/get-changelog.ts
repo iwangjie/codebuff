@@ -4,10 +4,10 @@ import path from 'path'
 
 import { disableLiveUserInputCheck } from '@codebuff/agent-runtime/live-user-inputs'
 import { models } from '@codebuff/common/old-constants'
+import { userMessage } from '@codebuff/common/util/messages'
 import { generateCompactId } from '@codebuff/common/util/string'
+import { promptAiSdk } from '@codebuff/sdk'
 import prettier from 'prettier'
-
-import { promptAiSdk } from '../backend/src/llm-apis/vercel-ai-sdk/ai-sdk'
 
 // Native slugify implementation
 function slugify(text: string): string {
@@ -167,7 +167,7 @@ Start your response with a heading using ### (three hashes) and organize the con
 
     disableLiveUserInputCheck()
     const response = await promptAiSdk({
-      messages: [{ role: 'user', content: prompt }],
+      messages: [userMessage(prompt)],
       clientSessionId: generateCompactId(),
       fingerprintId: generateCompactId(),
       userInputId: generateCompactId(),

@@ -1,6 +1,7 @@
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
 import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
 import { getInitialSessionState } from '@codebuff/common/types/session-state'
+import { assistantMessage } from '@codebuff/common/util/messages'
 import {
   describe,
   expect,
@@ -19,10 +20,19 @@ import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 
 import type { CodebuffToolCall } from '@codebuff/common/tools/list'
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
+import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 
 describe('Spawn Agents Permissions', () => {
   let mockSendSubagentChunk: any
   let mockLoopAgentSteps: any
+  let handleSpawnAgentsBaseParams: ParamsExcluding<
+    typeof handleSpawnAgents,
+    'agentState' | 'agentTemplate' | 'localAgentTemplates' | 'toolCall'
+  >
+  let handleSpawnAgentInlineBaseParams: ParamsExcluding<
+    typeof handleSpawnAgentInline,
+    'agentState' | 'agentTemplate' | 'localAgentTemplates' | 'toolCall'
+  >
 
   const createMockAgent = (
     id: string,
@@ -49,6 +59,28 @@ describe('Spawn Agents Permissions', () => {
   })
 
   beforeEach(() => {
+    handleSpawnAgentsBaseParams = {
+      ...TEST_AGENT_RUNTIME_IMPL,
+      ancestorRunIds: [],
+      clientSessionId: 'test-session',
+      fileContext: mockFileContext,
+      fingerprintId: 'test-fingerprint',
+      previousToolCallFinished: Promise.resolve(),
+      repoId: undefined,
+      repoUrl: undefined,
+      sendSubagentChunk: mockSendSubagentChunk,
+      signal: new AbortController().signal,
+      system: 'Test system prompt',
+      userId: TEST_USER_ID,
+      userInputId: 'test-input',
+      writeToClient: () => {},
+    }
+
+    handleSpawnAgentInlineBaseParams = {
+      ...handleSpawnAgentsBaseParams,
+      tools: {},
+    }
+
     // Mock sendSubagentChunk
     mockSendSubagentChunk = mock(() => {})
 
@@ -60,11 +92,9 @@ describe('Spawn Agents Permissions', () => {
       return {
         agentState: {
           ...options.agentState,
-          messageHistory: [
-            { role: 'assistant', content: 'Mock agent response' },
-          ],
+          messageHistory: [assistantMessage('Mock agent response')],
         },
-        output: { type: 'lastMessage', value: 'Mock agent response' },
+        output: { type: 'lastMessage', value: [assistantMessage('Mock agent response')] },
       }
     })
   })
@@ -232,30 +262,14 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createSpawnToolCall('thinker')
 
-      const { result } = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      const { output } = await handleSpawnAgents({
+        ...handleSpawnAgentsBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: { thinker: childAgent },
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: { thinker: childAgent },
-          sendSubagentChunk: mockSendSubagentChunk,
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      const output = await result
       expect(JSON.stringify(output)).toContain('Mock agent response')
       expect(mockLoopAgentSteps).toHaveBeenCalledTimes(1)
     })
@@ -266,30 +280,14 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createSpawnToolCall('reviewer') // Try to spawn reviewer
 
-      const { result } = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      const { output } = await handleSpawnAgents({
+        ...handleSpawnAgentsBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: { reviewer: childAgent },
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: { reviewer: childAgent },
-          sendSubagentChunk: mockSendSubagentChunk,
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      const output = await result
       expect(JSON.stringify(output)).toContain('Error spawning agent')
       expect(JSON.stringify(output)).toContain(
         'is not allowed to spawn child agent type reviewer',
@@ -302,30 +300,14 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createSpawnToolCall('nonexistent')
 
-      const { result } = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      const { output } = await handleSpawnAgents({
+        ...handleSpawnAgentsBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: {}, // Empty - agent not found
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: {}, // Empty - agent not found
-          sendSubagentChunk: mockSendSubagentChunk,
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      const output = await result
       console.log('output', output)
       expect(JSON.stringify(output)).toContain('Error spawning agent')
       expect(JSON.stringify(output)).toContain(
@@ -340,30 +322,14 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createSpawnToolCall('codebuff/thinker@1.0.0')
 
-      const { result } = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      const { output } = await handleSpawnAgents({
+        ...handleSpawnAgentsBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: { 'codebuff/thinker@1.0.0': childAgent },
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: { 'codebuff/thinker@1.0.0': childAgent },
-          sendSubagentChunk: mockSendSubagentChunk,
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      const output = await result
       expect(JSON.stringify(output)).toContain('Mock agent response')
       expect(mockLoopAgentSteps).toHaveBeenCalledTimes(1)
     })
@@ -374,33 +340,17 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createSpawnToolCall('thinker') // Simple name
 
-      const { result } = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
-        toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: {
-            thinker: childAgent,
-            'codebuff/thinker@1.0.0': childAgent, // Register with both keys
-          },
-          sendSubagentChunk: mockSendSubagentChunk,
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
+      const { output } = await handleSpawnAgents({
+        ...handleSpawnAgentsBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: {
+          thinker: childAgent,
+          'codebuff/thinker@1.0.0': childAgent, // Register with both keys
         },
+        toolCall,
       })
 
-      const output = await result
       expect(JSON.stringify(output)).toContain('Mock agent response')
       expect(mockLoopAgentSteps).toHaveBeenCalledTimes(1)
     })
@@ -411,30 +361,14 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createSpawnToolCall('codebuff/thinker@2.0.0')
 
-      const { result } = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      const { output } = await handleSpawnAgents({
+        ...handleSpawnAgentsBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: { 'codebuff/thinker@2.0.0': childAgent },
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: { 'codebuff/thinker@2.0.0': childAgent },
-          sendSubagentChunk: mockSendSubagentChunk,
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      const output = await result
       expect(JSON.stringify(output)).toContain('Error spawning agent')
       expect(JSON.stringify(output)).toContain(
         'is not allowed to spawn child agent type',
@@ -459,33 +393,17 @@ describe('Spawn Agents Permissions', () => {
         },
       }
 
-      const { result } = handleSpawnAgents({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
-        toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: {
-            thinker: thinkerAgent,
-            reviewer: reviewerAgent,
-          },
-          sendSubagentChunk: mockSendSubagentChunk,
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
+      const { output } = await handleSpawnAgents({
+        ...handleSpawnAgentsBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: {
+          thinker: thinkerAgent,
+          reviewer: reviewerAgent,
         },
+        toolCall,
       })
 
-      const output = await result
       expect(JSON.stringify(output)).toContain('Mock agent response') // Successful thinker spawn
       expect(JSON.stringify(output)).toContain('Error spawning agent') // Failed reviewer spawn
       expect(JSON.stringify(output)).toContain(
@@ -514,29 +432,15 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createInlineSpawnToolCall('thinker')
 
-      const { result } = handleSpawnAgentInline({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      // Should not throw
+      await handleSpawnAgentInline({
+        ...handleSpawnAgentInlineBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: { thinker: childAgent },
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: { thinker: childAgent },
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      await result // Should not throw
       expect(mockLoopAgentSteps).toHaveBeenCalledTimes(1)
     })
 
@@ -546,29 +450,15 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createInlineSpawnToolCall('reviewer') // Try to spawn reviewer
 
-      const { result } = handleSpawnAgentInline({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      const result = handleSpawnAgentInline({
+        ...handleSpawnAgentInlineBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: { reviewer: childAgent },
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: { reviewer: childAgent },
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      await expect(result).rejects.toThrow(
+      expect(result).rejects.toThrow(
         'is not allowed to spawn child agent type reviewer',
       )
       expect(mockLoopAgentSteps).not.toHaveBeenCalled()
@@ -579,29 +469,15 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createInlineSpawnToolCall('nonexistent')
 
-      const { result } = handleSpawnAgentInline({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      const result = handleSpawnAgentInline({
+        ...handleSpawnAgentInlineBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: {}, // Empty - agent not found
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: {}, // Empty - agent not found
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      await expect(result).rejects.toThrow('Agent type nonexistent not found')
+      expect(result).rejects.toThrow('Agent type nonexistent not found')
       expect(mockLoopAgentSteps).not.toHaveBeenCalled()
     })
 
@@ -611,29 +487,15 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createInlineSpawnToolCall('codebuff/thinker@1.0.0')
 
-      const { result } = handleSpawnAgentInline({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      // Should not throw
+      await handleSpawnAgentInline({
+        ...handleSpawnAgentInlineBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: { 'codebuff/thinker@1.0.0': childAgent },
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: { 'codebuff/thinker@1.0.0': childAgent },
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      await result // Should not throw
       expect(mockLoopAgentSteps).toHaveBeenCalledTimes(1)
     })
 
@@ -643,32 +505,18 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createInlineSpawnToolCall('thinker') // Simple name
 
-      const { result } = handleSpawnAgentInline({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
-        toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: {
-            thinker: childAgent,
-            'codebuff/thinker@1.0.0': childAgent, // Register with both keys
-          },
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
+      // Should not throw
+      await handleSpawnAgentInline({
+        ...handleSpawnAgentInlineBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: {
+          thinker: childAgent,
+          'codebuff/thinker@1.0.0': childAgent, // Register with both keys
         },
+        toolCall,
       })
 
-      await result // Should not throw
       expect(mockLoopAgentSteps).toHaveBeenCalledTimes(1)
     })
 
@@ -678,59 +526,15 @@ describe('Spawn Agents Permissions', () => {
       const sessionState = getInitialSessionState(mockFileContext)
       const toolCall = createInlineSpawnToolCall('codebuff/thinker@2.0.0')
 
-      const { result } = handleSpawnAgentInline({
-        ...TEST_AGENT_RUNTIME_IMPL,
-        repoId: undefined,
-        repoUrl: undefined,
-        previousToolCallFinished: Promise.resolve(),
+      const result = handleSpawnAgentInline({
+        ...handleSpawnAgentInlineBaseParams,
+        agentState: sessionState.mainAgentState,
+        agentTemplate: parentAgent,
+        localAgentTemplates: { 'codebuff/thinker@2.0.0': childAgent },
         toolCall,
-        fileContext: mockFileContext,
-        clientSessionId: 'test-session',
-        userInputId: 'test-input',
-        writeToClient: () => {},
-        getLatestState: () => ({ messages: [] }),
-        state: {
-          fingerprintId: 'test-fingerprint',
-          userId: TEST_USER_ID,
-          agentTemplate: parentAgent,
-          localAgentTemplates: { 'codebuff/thinker@2.0.0': childAgent },
-          messages: [],
-          agentState: sessionState.mainAgentState,
-          system: 'Test system prompt',
-        },
       })
 
-      await expect(result).rejects.toThrow(
-        'is not allowed to spawn child agent type',
-      )
-      expect(mockLoopAgentSteps).not.toHaveBeenCalled()
-    })
-
-    it('should validate required state parameters for inline spawn', async () => {
-      const parentAgent = createMockAgent('parent', ['thinker'])
-      const toolCall = createInlineSpawnToolCall('thinker')
-
-      expect(() => {
-        handleSpawnAgentInline({
-          ...TEST_AGENT_RUNTIME_IMPL,
-          repoId: undefined,
-          repoUrl: undefined,
-          previousToolCallFinished: Promise.resolve(),
-          toolCall,
-          fileContext: mockFileContext,
-          clientSessionId: 'test-session',
-          userInputId: 'test-input',
-          writeToClient: () => {},
-          getLatestState: () => ({ messages: [] }),
-          state: {
-            // Missing required fields like ws, fingerprintId, etc.
-            agentTemplate: parentAgent,
-            localAgentTemplates: {},
-          },
-        })
-      }).toThrow(
-        'Internal error for spawn_agent_inline: Missing fingerprintId in state',
-      )
+      expect(result).rejects.toThrow('is not allowed to spawn child agent type')
       expect(mockLoopAgentSteps).not.toHaveBeenCalled()
     })
   })
