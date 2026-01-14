@@ -71,7 +71,6 @@ import type { SendMessageFn } from './types/contracts/send-message'
 import type { AgentMode } from './utils/constants'
 import type { FileTreeNode } from '@codebuff/common/util/file'
 import type { ScrollBoxRenderable } from '@opentui/core'
-import type { Dispatch, SetStateAction } from 'react'
 
 export const Chat = ({
   headerContent,
