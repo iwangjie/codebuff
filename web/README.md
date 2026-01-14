@@ -30,8 +30,13 @@ Mainly used for logging in and managing Codebuff API quotas.
 
 ## How to Set Up Locally
 
-1. Copy `.env.example` to `.env` and fill in the values.
+1. Copy `.env.example` to `.env`.
    `cp .env.example .env`
+
+   - For fully-local BYOK mode, only set:
+     - `CODEBUFF_BYOK_OPENROUTER`
+     - `CODEBUFF_BYOK_OPENROUTER_BASE_URL`
+   - For the full web app (auth/billing/DB integrations), uncomment and fill the optional variables.
 2. Run `bun install` to install dependencies
 3. Run `bun run db:generate` to create migration files (if they differ from schema)
 4. Run `bun run db:migrate` to apply migrations
