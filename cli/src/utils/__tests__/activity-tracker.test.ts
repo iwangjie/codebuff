@@ -351,7 +351,7 @@ describe('activity-tracker integration scenarios', () => {
   })
 
   describe('activity-aware polling scenarios', () => {
-    test('idle user should not trigger quota polling', () => {
+    test('idle user should not trigger polling', () => {
       const idleThreshold = 30000
 
       // User was active
