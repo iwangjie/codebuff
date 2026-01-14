@@ -166,7 +166,7 @@ async function main() {
 
   const buildArgs = [
     'build',
-    'src/index.tsx',
+    'src/bootstrap.ts',
     '--compile',
     '--production', // Required so compiled binaries use the production JSX runtime (avoids jsxDEV crashes).
     `--target=${targetInfo.bunTarget}`,
