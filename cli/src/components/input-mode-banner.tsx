@@ -4,7 +4,6 @@ import { ClaudeConnectBanner } from './claude-connect-banner'
 import { HelpBanner } from './help-banner'
 import { PendingImagesBanner } from './pending-images-banner'
 import { ReferralBanner } from './referral-banner'
-import { UsageBanner } from './usage-banner'
 import { useChatStore } from '../state/chat-store'
 
 /**
@@ -16,13 +15,9 @@ import { useChatStore } from '../state/chat-store'
  *
  * Render functions receive context (like showTime) and return the component.
  */
-const BANNER_REGISTRY: Record<
-  string,
-  (ctx: { showTime: number }) => React.ReactNode
-> = {
+const BANNER_REGISTRY: Record<string, () => React.ReactNode> = {
   default: () => <PendingImagesBanner />,
   image: () => <PendingImagesBanner />,
-  usage: ({ showTime }) => <UsageBanner showTime={showTime} />,
   referral: () => <ReferralBanner />,
   help: () => <HelpBanner />,
   'connect:claude': () => <ClaudeConnectBanner />,
@@ -38,21 +33,11 @@ const BANNER_REGISTRY: Record<
 export const InputModeBanner = () => {
   const inputMode = useChatStore((state) => state.inputMode)
 
-  const [usageBannerShowTime, setUsageBannerShowTime] = React.useState(() =>
-    Date.now(),
-  )
-
-  React.useEffect(() => {
-    if (inputMode === 'usage') {
-      setUsageBannerShowTime(Date.now())
-    }
-  }, [inputMode])
-
   const renderBanner = BANNER_REGISTRY[inputMode]
 
   if (!renderBanner) {
     return null
   }
 
-  return <>{renderBanner({ showTime: usageBannerShowTime })}</>
+  return <>{renderBanner()}</>
 }

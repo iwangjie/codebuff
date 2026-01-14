@@ -160,12 +160,12 @@ describe('command factory pattern', () => {
       expect(withArgsCommands.length).toBeGreaterThan(0)
     })
 
-    test('expected commands ignore args', () => {
-      const expectedNoArgs = ['login', 'logout', 'exit', 'usage', 'init']
-      for (const name of expectedNoArgs) {
-        const cmd = COMMAND_REGISTRY.find((c) => c.name === name)
-        expect(cmd, `Command ${name} should exist`).toBeDefined()
-        expect(cmd?.acceptsArgs, `Command ${name} should not accept args`).toBe(
+	    test('expected commands ignore args', () => {
+	      const expectedNoArgs = ['login', 'logout', 'exit', 'init', 'help']
+	      for (const name of expectedNoArgs) {
+	        const cmd = COMMAND_REGISTRY.find((c) => c.name === name)
+	        expect(cmd, `Command ${name} should exist`).toBeDefined()
+	        expect(cmd?.acceptsArgs, `Command ${name} should not accept args`).toBe(
           false,
         )
       }

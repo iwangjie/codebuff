@@ -376,7 +376,7 @@ describe('handleRunError', () => {
     expect(setInputModeMock).not.toHaveBeenCalled()
   })
 
-  test('Payment required error (402) uses setError, invalidates queries, and switches input mode', () => {
+  test('Payment required error (402) appends error message and does not switch input mode', () => {
     let messages: ChatMessage[] = [
       {
         id: 'ai-1',
@@ -414,8 +414,8 @@ describe('handleRunError', () => {
     const aiMessage = messages.find((m) => m.id === 'ai-1')
     expect(aiMessage).toBeDefined()
 
-    // For PaymentRequiredError, setError is used which OVERWRITES content
-    expect(aiMessage!.content).not.toContain('Partial streamed content')
+    // PaymentRequiredError is treated like a regular error in local-only mode
+    expect(aiMessage!.content).toContain('Partial streamed content')
     expect(aiMessage!.content).toContain('Out of credits')
 
     // Blocks should be preserved for debugging context
@@ -424,8 +424,8 @@ describe('handleRunError', () => {
     // Message should be marked complete
     expect(aiMessage!.isComplete).toBe(true)
 
-    // Input mode should switch to outOfCredits
-    expect(setInputModeMock).toHaveBeenCalledWith('outOfCredits')
+    // Input mode should not switch
+    expect(setInputModeMock).not.toHaveBeenCalled()
 
     // Timer should still be stopped with error
     expect(timerController.stopCalls).toContain('error')

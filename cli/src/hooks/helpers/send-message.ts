@@ -3,11 +3,7 @@ import { useChatStore } from '../../state/chat-store'
 import { processBashContext } from '../../utils/bash-context-processor'
 import {
   createErrorMessage,
-  isOutOfCreditsError,
-  OUT_OF_CREDITS_MESSAGE,
 } from '../../utils/error-handling'
-import { invalidateActivityQuery } from '../use-activity-query'
-import { usageQueryKeys } from '../use-usage-query'
 import { formatElapsedTime } from '../../utils/format-elapsed-time'
 import { processImagesForMessage } from '../../utils/image-processor'
 import { logger } from '../../utils/logger'
@@ -212,14 +208,6 @@ export const handleRunCompletion = (params: {
       return
     }
 
-    if (isOutOfCreditsError(output)) {
-      updater.setError(OUT_OF_CREDITS_MESSAGE)
-      useChatStore.getState().setInputMode('outOfCredits')
-      invalidateActivityQuery(usageQueryKeys.current())
-      finalizeAfterError()
-      return
-    }
-
     const partial = createErrorMessage(
       output.message ?? 'No output from agent run',
       aiMessageId,
@@ -229,8 +217,6 @@ export const handleRunCompletion = (params: {
     finalizeAfterError()
     return
   }
-
-  invalidateActivityQuery(usageQueryKeys.current())
 
   setStreamStatus('idle')
   if (resumeQueue) {
@@ -292,13 +278,6 @@ export const handleRunError = (params: {
   setCanProcessQueue(true)
   updateChainInProgress(false)
   timerController.stop('error')
-
-  if (isOutOfCreditsError(error)) {
-    updater.setError(OUT_OF_CREDITS_MESSAGE)
-    useChatStore.getState().setInputMode('outOfCredits')
-    invalidateActivityQuery(usageQueryKeys.current())
-    return
-  }
 
   updater.updateAiMessage((msg) => {
     const updatedContent = [msg.content, partial.content]

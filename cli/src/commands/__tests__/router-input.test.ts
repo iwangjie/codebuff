@@ -68,30 +68,30 @@ describe('router-utils', () => {
     })
   })
 
-  describe('parseCommand', () => {
-    test('extracts command from slashed input', () => {
-      expect(parseCommand('/help')).toBe('help')
-      expect(parseCommand('/logout')).toBe('logout')
-      expect(parseCommand('/usage')).toBe('usage')
-    })
+	  describe('parseCommand', () => {
+	    test('extracts command from slashed input', () => {
+	      expect(parseCommand('/help')).toBe('help')
+	      expect(parseCommand('/logout')).toBe('logout')
+	      expect(parseCommand('/init')).toBe('init')
+	    })
 
-    test('returns empty string for unslashed input (not a slash command)', () => {
-      expect(parseCommand('help')).toBe('')
-      expect(parseCommand('logout')).toBe('')
-      expect(parseCommand('usage')).toBe('')
-      expect(parseCommand('login to my database')).toBe('')
-    })
+	    test('returns empty string for unslashed input (not a slash command)', () => {
+	      expect(parseCommand('help')).toBe('')
+	      expect(parseCommand('logout')).toBe('')
+	      expect(parseCommand('init')).toBe('')
+	      expect(parseCommand('login to my database')).toBe('')
+	    })
 
-    test('extracts first word as command when there are arguments', () => {
-      expect(parseCommand('/help me')).toBe('help')
-      expect(parseCommand('/usage stats')).toBe('usage')
-    })
+	    test('extracts first word as command when there are arguments', () => {
+	      expect(parseCommand('/help me')).toBe('help')
+	      expect(parseCommand('/login token')).toBe('login')
+	    })
 
-    test('converts command to lowercase', () => {
-      expect(parseCommand('/HELP')).toBe('help')
-      expect(parseCommand('/LOGOUT')).toBe('logout')
-      expect(parseCommand('/UsAgE')).toBe('usage')
-    })
+	    test('converts command to lowercase', () => {
+	      expect(parseCommand('/HELP')).toBe('help')
+	      expect(parseCommand('/LOGOUT')).toBe('logout')
+	      expect(parseCommand('/InIt')).toBe('init')
+	    })
 
     test('handles empty string', () => {
       expect(parseCommand('')).toBe('')
@@ -138,16 +138,14 @@ describe('router-utils', () => {
     })
   })
 
-  describe('slash commands only work with / prefix', () => {
-    const slashCommands = [
-      'login',
-      'logout',
-      'usage',
-      'credits',
-      'exit',
-      'clear',
-      'new',
-      'init',
+	  describe('slash commands only work with / prefix', () => {
+	    const slashCommands = [
+	      'login',
+	      'logout',
+	      'exit',
+	      'clear',
+	      'new',
+	      'init',
       'bash',
       'feedback',
     ]
@@ -216,26 +214,18 @@ describe('router-utils', () => {
   })
 })
 
-describe('command-registry', () => {
-  describe('findCommand', () => {
-    test('finds command by name', () => {
-      const login = findCommand('login')
-      expect(login).toBeDefined()
-      expect(login?.name).toBe('login')
+	describe('command-registry', () => {
+	  describe('findCommand', () => {
+	    test('finds command by name', () => {
+	      const login = findCommand('login')
+	      expect(login).toBeDefined()
+	      expect(login?.name).toBe('login')
+	    })
 
-      const usage = findCommand('usage')
-      expect(usage).toBeDefined()
-      expect(usage?.name).toBe('usage')
-    })
-
-    test('finds command by alias', () => {
-      const credits = findCommand('credits')
-      expect(credits).toBeDefined()
-      expect(credits?.name).toBe('usage')
-
-      const quit = findCommand('quit')
-      expect(quit).toBeDefined()
-      expect(quit?.name).toBe('exit')
+	    test('finds command by alias', () => {
+	      const quit = findCommand('quit')
+	      expect(quit).toBeDefined()
+	      expect(quit?.name).toBe('exit')
 
       const signin = findCommand('signin')
       expect(signin).toBeDefined()
@@ -247,12 +237,11 @@ describe('command-registry', () => {
       expect(findCommand('notacommand')).toBeUndefined()
     })
 
-    test('is case insensitive', () => {
-      expect(findCommand('LOGIN')?.name).toBe('login')
-      expect(findCommand('UsAgE')?.name).toBe('usage')
-      expect(findCommand('CREDITS')?.name).toBe('usage')
-    })
-  })
+	    test('is case insensitive', () => {
+	      expect(findCommand('LOGIN')?.name).toBe('login')
+	      expect(findCommand('InIt')?.name).toBe('init')
+	    })
+	  })
 
   describe('COMMAND_REGISTRY', () => {
     test('all commands have unique names', () => {

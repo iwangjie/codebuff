@@ -37,17 +37,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   //   description: 'Redo the most recent undone change',
   // },
   {
-    id: 'usage',
-    label: 'usage',
-    description: 'View credits and subscription quota',
-    aliases: ['credits'],
-  },
-  {
-    id: 'buy-credits',
-    label: 'buy-credits',
-    description: 'Open the usage page to buy credits',
-  },
-  {
     id: 'new',
     label: 'new',
     description: 'Start a fresh conversation session',
@@ -83,16 +72,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     aliases: ['h', '?'],
   },
   ...MODE_COMMANDS,
-  {
-    id: 'ads:enable',
-    label: 'ads:enable (beta)',
-    description: 'Enable contextual ads and earn credits',
-  },
-  {
-    id: 'ads:disable',
-    label: 'ads:disable (beta)',
-    description: 'Disable contextual ads',
-  },
   {
     id: 'referral',
     label: 'referral',

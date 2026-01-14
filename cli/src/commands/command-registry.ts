@@ -1,14 +1,9 @@
-import open from 'open'
-
-import { handleAdsEnable, handleAdsDisable } from './ads'
 import { handleHelpCommand } from './help'
 import { handleImageCommand } from './image'
 import { handleInitializationFlowLocally } from './init'
 import { handleReferralCode } from './referral'
 import { runBashCommand } from './router'
 import { normalizeReferralCode } from './router-utils'
-import { handleUsageCommand } from './usage'
-import { WEBSITE_URL } from '../login/constants'
 import { useChatStore } from '../state/chat-store'
 import { useFeedbackStore } from '../state/feedback-store'
 import { useLoginStore } from '../state/login-store'
@@ -160,24 +155,6 @@ const clearInput = (params: RouterParams) => {
 }
 
 export const COMMAND_REGISTRY: CommandDefinition[] = [
-  defineCommand({
-    name: 'ads:enable',
-    handler: (params) => {
-      const { postUserMessage } = handleAdsEnable()
-      params.setMessages((prev) => postUserMessage(prev))
-      params.saveToHistory(params.inputValue.trim())
-      clearInput(params)
-    },
-  }),
-  defineCommand({
-    name: 'ads:disable',
-    handler: (params) => {
-      const { postUserMessage } = handleAdsDisable()
-      params.setMessages((prev) => postUserMessage(prev))
-      params.saveToHistory(params.inputValue.trim())
-      clearInput(params)
-    },
-  }),
   defineCommand({
     name: 'help',
     aliases: ['h', '?'],
@@ -367,24 +344,6 @@ export const COMMAND_REGISTRY: CommandDefinition[] = [
       setTimeout(() => {
         params.scrollToLatest()
       }, 0)
-    },
-  }),
-  defineCommand({
-    name: 'usage',
-    aliases: ['credits'],
-    handler: async (params) => {
-      const { postUserMessage } = await handleUsageCommand()
-      params.setMessages((prev) => postUserMessage(prev))
-      params.saveToHistory(params.inputValue.trim())
-      clearInput(params)
-    },
-  }),
-  defineCommand({
-    name: 'buy-credits',
-    handler: (params) => {
-      open(WEBSITE_URL + '/profile?tab=usage')
-      // Don't save to history.
-      clearInput(params)
     },
   }),
   defineCommandWithArgs({

@@ -3,15 +3,8 @@ import path, { dirname } from 'path'
 import { format as stringFormat } from 'util'
 
 import { env, IS_DEV, IS_TEST, IS_CI } from '@codebuff/common/env'
-import { createAnalyticsDispatcher } from '@codebuff/common/util/analytics-dispatcher'
 import { pino } from 'pino'
 
-import {
-  flushAnalytics,
-  logError,
-  setAnalyticsErrorLogger,
-  trackEvent,
-} from './analytics'
 import { getCurrentChatDir, getProjectRoot } from '../project-files'
 
 export interface LoggerContext {
@@ -30,10 +23,6 @@ let pinoLogger: any = undefined
 
 const loggingLevels = ['info', 'debug', 'warn', 'error', 'fatal'] as const
 type LogLevel = (typeof loggingLevels)[number]
-const analyticsDispatcher = createAnalyticsDispatcher({
-  envName: env.NEXT_PUBLIC_CB_ENVIRONMENT,
-  bufferWhenNoUser: true,
-})
 
 function isEmptyObject(value: any): boolean {
   return (
@@ -130,21 +119,6 @@ function sendAnalyticsAndLog(
     msg: stringFormat(normalizedMsg, ...args),
   }
 
-  logAsErrorIfNeeded(toTrack)
-
-  if (!IS_DEV && includeData && typeof normalizedData === 'object') {
-    const analyticsPayloads = analyticsDispatcher.process({
-      data: normalizedData,
-      level,
-      msg: stringFormat(normalizedMsg ?? '', ...args),
-      fallbackUserId: loggerContext.userId,
-    })
-
-    analyticsPayloads.forEach((payload) => {
-      trackEvent(payload.event, payload.properties)
-    })
-  }
-
   // In dev mode, use appendFileSync for real-time logging (Bun has issues with pino sync)
   // In prod mode, use pino for better performance
   if (IS_DEV && logPath) {
@@ -167,28 +141,8 @@ function sendAnalyticsAndLog(
   }
 }
 
-function logAsErrorIfNeeded(toTrack: {
-  data?: any
-  level: LogLevel
-  loggerContext: LoggerContext
-  msg: string
-}) {
-  if (toTrack.level === 'error' || toTrack.level === 'fatal') {
-    logError(
-      new Error(toTrack.msg),
-      toTrack.loggerContext.userId ?? 'unknown',
-      { ...(toTrack.data ?? {}), context: toTrack.loggerContext },
-    )
-    flushAnalytics()
-  }
-}
-
 /**
  * Wrapper around Pino logger.
- *
- * To also send to Posthog, set data.eventId to type AnalyticsEvent
- *
- * e.g. logger.info({eventId: AnalyticsEvent.SOME_EVENT, field: value}, 'some message')
  */
 export const logger: Record<LogLevel, pino.LogFn> = Object.fromEntries(
   loggingLevels.map((level) => {
@@ -199,21 +153,3 @@ export const logger: Record<LogLevel, pino.LogFn> = Object.fromEntries(
     ]
   }),
 ) as Record<LogLevel, pino.LogFn>
-
-setAnalyticsErrorLogger((error, context) => {
-  const err =
-    error instanceof Error ? error : new Error(typeof error === 'string' ? error : 'Unknown analytics error')
-
-  logger.warn(
-    {
-      analyticsError: true,
-      error: {
-        name: err.name,
-        message: err.message,
-        stack: err.stack,
-      },
-      context,
-    },
-    '[analytics] error',
-  )
-})

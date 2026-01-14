@@ -1,6 +1,4 @@
-import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { RECONNECTION_MESSAGE_DURATION_MS } from '@codebuff/sdk'
-import open from 'open'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useCallback,
@@ -12,12 +10,9 @@ import {
 } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 
-import { getAdsEnabled } from './commands/ads'
 import { routeUserPrompt, addBashMessageToHistory } from './commands/router'
-import { AdBanner } from './components/ad-banner'
 import { ChatInputBar } from './components/chat-input-bar'
 import { BottomStatusLine } from './components/bottom-status-line'
-import { areCreditsRestored } from './components/out-of-credits-banner'
 import { LoadPreviousButton } from './components/load-previous-button'
 import { MessageWithAgents } from './components/message-with-agents'
 import { PendingBashMessage } from './components/pending-bash-message'
@@ -36,7 +31,6 @@ import {
 import { useClipboard } from './hooks/use-clipboard'
 import { useConnectionStatus } from './hooks/use-connection-status'
 import { useElapsedTime } from './hooks/use-elapsed-time'
-import { useGravityAd } from './hooks/use-gravity-ad'
 import { useEvent } from './hooks/use-event'
 import { useExitHandler } from './hooks/use-exit-handler'
 import { useInputHistory } from './hooks/use-input-history'
@@ -51,7 +45,6 @@ import { useTerminalDimensions } from './hooks/use-terminal-dimensions'
 import { useTerminalLayout } from './hooks/use-terminal-layout'
 import { useTheme } from './hooks/use-theme'
 import { useTimeout } from './hooks/use-timeout'
-import { useUsageMonitor } from './hooks/use-usage-monitor'
 import { WEBSITE_URL } from './login/constants'
 import { getProjectRoot } from './project-files'
 import { useChatStore } from './state/chat-store'
@@ -81,8 +74,6 @@ import { getClaudeOAuthStatus } from './utils/claude-oauth'
 import { createPasteHandler } from './utils/strings'
 import { computeInputLayoutMetrics } from './utils/text-layout'
 import { createMarkdownPalette } from './utils/theme-system'
-import { reportActivity } from './utils/activity-tracker'
-import { trackEvent } from './utils/analytics'
 
 import type { CommandResult } from './commands/command-registry'
 import type { MultilineInputHandle } from './components/multiline-input'
@@ -156,9 +147,6 @@ export const Chat = ({
 
   // Subscribe to ask_user bridge to trigger form display
   useAskUserBridge()
-
-  // Monitor usage data and auto-show banner when thresholds are crossed
-  useUsageMonitor()
 
   const {
     inputValue,
@@ -253,7 +241,6 @@ export const Chat = ({
 
   const isConnected = useConnectionStatus(handleReconnection)
   const mainAgentTimer = useElapsedTime()
-  const { ad } = useGravityAd()
   // Use startTime for active timer display; when paused, timer hook maintains frozen value
   const timerStartTime = mainAgentTimer.startTime
 
@@ -449,16 +436,6 @@ export const Chat = ({
     }
   }, [askUserState, mainAgentTimer])
 
-  // Filter slash commands based on current ads state - only show the option that changes state
-  const filteredSlashCommands = useMemo(() => {
-    const adsEnabled = getAdsEnabled()
-    return SLASH_COMMANDS.filter((cmd) => {
-      if (cmd.id === 'ads:enable') return !adsEnabled
-      if (cmd.id === 'ads:disable') return adsEnabled
-      return true
-    })
-  }, [inputValue]) // Re-evaluate when input changes (user may have just toggled)
-
   const {
     slashContext,
     mentionContext,
@@ -472,7 +449,7 @@ export const Chat = ({
     disableAgentSuggestions: forceFileOnlyMentions || inputMode !== 'default',
     inputValue: inputMode === 'bash' ? '' : inputValue,
     cursorPosition,
-    slashCommands: filteredSlashCommands,
+    slashCommands: SLASH_COMMANDS,
     localAgents,
     fileTree,
     currentAgentMode: agentMode,
@@ -483,19 +460,6 @@ export const Chat = ({
       setForceFileOnlyMentions(false)
     }
   }, [mentionContext.active])
-
-  // Track when slash menu is activated
-  const prevSlashActiveRef = useRef(false)
-  useEffect(() => {
-    if (slashContext.active && !prevSlashActiveRef.current) {
-      trackEvent(AnalyticsEvent.SLASH_MENU_ACTIVATED, {
-        queryLength: slashContext.query.length,
-        matchCount: slashMatches.length,
-        inputLength: inputValue.length,
-      })
-    }
-    prevSlashActiveRef.current = slashContext.active
-  }, [slashContext.active, slashContext.query, slashMatches.length, inputValue.length])
 
   // Reset suggestion menu indexes when context changes
   useEffect(() => {
@@ -934,16 +898,6 @@ export const Chat = ({
     inputValueRef.current = inputValue
   }, [inputValue])
 
-  // Report activity on input changes for ad rotation (debounced via separate effect)
-  const lastReportedActivityRef = useRef<number>(0)
-  useEffect(() => {
-    const now = Date.now()
-    // Throttle to max once per second to avoid excessive calls
-    if (now - lastReportedActivityRef.current > 1000) {
-      lastReportedActivityRef.current = now
-      reportActivity()
-    }
-  }, [inputValue])
   useEffect(() => {
     cursorPositionRef.current = cursorPosition
   }, [cursorPosition])
@@ -1016,8 +970,6 @@ export const Chat = ({
   }, [feedbackMode, askUserState, inputRef])
 
   const handleSubmit = useCallback(async () => {
-    // Report activity for ad rotation
-    reportActivity()
     const result = await onSubmitPrompt(inputValue, agentMode)
     handleCommandResult(result)
   }, [onSubmitPrompt, inputValue, agentMode, handleCommandResult])
@@ -1277,15 +1229,6 @@ export const Chat = ({
       },
       onScrollUp: scrollUp,
       onScrollDown: scrollDown,
-      onOpenBuyCredits: () => {
-        // If credits have been restored, just return to default mode
-        if (areCreditsRestored()) {
-          setInputMode('default')
-          return
-        }
-        // Otherwise open the buy credits page
-        open(WEBSITE_URL + '/usage')
-      },
     }),
     [
       setInputMode,
@@ -1424,20 +1367,8 @@ export const Chat = ({
   // Determine if Claude is actively streaming/waiting
   const isClaudeActive = isStreaming || isWaitingForResponse
 
-  // Track mouse movement for ad activity (throttled)
-  const lastMouseActivityRef = useRef<number>(0)
-  const handleMouseActivity = useCallback(() => {
-    const now = Date.now()
-    // Throttle to max once per second
-    if (now - lastMouseActivityRef.current > 1000) {
-      lastMouseActivityRef.current = now
-      reportActivity()
-    }
-  }, [])
-
   return (
     <box
-      onMouseMove={handleMouseActivity}
       style={{
         flexDirection: 'column',
         gap: 0,
@@ -1539,8 +1470,6 @@ export const Chat = ({
             statusIndicatorState={statusIndicatorState}
           />
         )}
-
-        {ad && getAdsEnabled() && <AdBanner ad={ad} />}
 
         <ChatInputBar
           inputValue={inputValue}

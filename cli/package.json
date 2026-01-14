@@ -29,7 +29,6 @@
   },
   "dependencies": {
     "@codebuff/sdk": "workspace:*",
-    "@gravity-ai/api": "^0.1.2",
     "@opentui/core": "^0.1.70",
     "@opentui/react": "^0.1.70",
     "@tanstack/react-query": "^5.90.12",
@@ -38,7 +37,6 @@
     "jimp": "^1.6.0",
     "open": "^10.1.0",
     "pino": "9.4.0",
-    "posthog-node": "^5.8.0",
     "react": "^19.0.0",
     "react-reconciler": "^0.32.0",
     "remark-breaks": "^4.0.0",

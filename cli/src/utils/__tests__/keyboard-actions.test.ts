@@ -65,10 +65,10 @@ describe('resolveChatKeyboardAction', () => {
       })
     })
 
-    test('escape in usage mode exits mode', () => {
+    test('escape in help mode exits mode', () => {
       const state: ChatKeyboardState = {
         ...defaultState,
-        inputMode: 'usage',
+        inputMode: 'help',
       }
       expect(resolveChatKeyboardAction(escapeKey, state)).toEqual({
         type: 'exit-input-mode',

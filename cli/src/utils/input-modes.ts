@@ -8,11 +8,9 @@ export type InputMode =
   | 'bash'
   | 'homeDir'
   | 'referral'
-  | 'usage'
   | 'image'
   | 'help'
   | 'connect:claude'
-  | 'outOfCredits'
 
 // Theme color keys that are valid color values (must match ChatTheme keys)
 export type ThemeColorKey =
@@ -74,14 +72,6 @@ export const INPUT_MODE_CONFIGS: Record<InputMode, InputModeConfig> = {
     showAgentModeToggle: false,
     disableSlashSuggestions: true,
   },
-  usage: {
-    icon: null,
-    color: 'foreground',
-    placeholder: 'enter a coding task or / for commands',
-    widthAdjustment: 0,
-    showAgentModeToggle: true,
-    disableSlashSuggestions: false,
-  },
   image: {
     icon: '📎',
     color: 'imageCardBorder',
@@ -103,14 +93,6 @@ export const INPUT_MODE_CONFIGS: Record<InputMode, InputModeConfig> = {
     color: 'info',
     placeholder: 'paste authorization code here...',
     widthAdjustment: 3, // emoji width + padding
-    showAgentModeToggle: false,
-    disableSlashSuggestions: true,
-  },
-  outOfCredits: {
-    icon: null,
-    color: 'warning',
-    placeholder: '',
-    widthAdjustment: 0,
     showAgentModeToggle: false,
     disableSlashSuggestions: true,
   },

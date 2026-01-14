@@ -185,7 +185,7 @@ describe('use-suggestion-engine - filterFileMatches', () => {
   const sampleFiles = [
     'cli/src/hooks/use-suggestion-engine.ts',
     'cli/src/hooks/use-timeout.ts',
-    'cli/src/hooks/use-usage-query.ts',
+    'cli/src/hooks/use-connection-status.ts',
     'cli/src/components/suggestion-menu.tsx',
     'cli/src/chat.tsx',
     'web/src/components/ui/button.tsx',
@@ -203,9 +203,9 @@ describe('use-suggestion-engine - filterFileMatches', () => {
         results.some((r) => r.filePath.includes('use-suggestion-engine')),
       ).toBe(true)
       expect(results.some((r) => r.filePath.includes('use-timeout'))).toBe(true)
-      expect(results.some((r) => r.filePath.includes('use-usage-query'))).toBe(
-        true,
-      )
+      expect(
+        results.some((r) => r.filePath.includes('use-connection-status')),
+      ).toBe(true)
     })
 
     test('matches "cli/hooks/use-" to specific hook files', () => {
