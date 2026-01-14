@@ -31,3 +31,4 @@ debug/
 # Infisical config (user-specific)
 .infisical.json
 bin
+.code
