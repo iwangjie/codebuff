@@ -16,6 +16,7 @@ import { useChatStore } from '../state/chat-store'
 import { logger } from '../utils/logger'
 import { clamp } from '../utils/math'
 import { calculateNewCursorPosition } from '../utils/word-wrap-utils'
+import { burstSafeInsertText } from '../utils/burst-safe-text'
 
 import type { InputValue } from '../state/chat-store'
 import type {
@@ -184,6 +185,22 @@ export const MultilineInput = forwardRef<
   const hookBlinkValue = useChatStore((state) => state.isFocusSupported)
   const effectiveShouldBlinkCursor = shouldBlinkCursor ?? hookBlinkValue
 
+  /**
+   * IME (e.g. Chinese input methods) can "commit" multiple characters extremely fast,
+   * sometimes faster than React/Zustand propagation can re-render this component.
+   *
+   * If we compute edits from `value`/`cursorPosition` captured by closures, a burst
+   * of key events can repeatedly apply edits to the same stale snapshot, leaving
+   * only the final character visible (e.g. "你好师姐" -> "姐").
+   *
+   * Keep an optimistic ref of the latest text + cursor and update it immediately
+   * when we emit `onChange`, so rapid sequential edits compose correctly.
+   */
+  const latestValueRef = useRef(value)
+  const latestCursorRef = useRef(cursorPosition)
+  latestValueRef.current = value
+  latestCursorRef.current = cursorPosition
+
   const scrollBoxRef = useRef<ScrollBoxRenderable | null>(null)
   const [lastActivity, setLastActivity] = useState(Date.now())
 
@@ -315,32 +332,35 @@ export const MultilineInput = forwardRef<
       // Check if there's a selection to replace
       const selection = getSelectionRange()
       if (selection) {
-        // Replace selected text with the new text
-        const newValue =
-          value.slice(0, selection.start) +
-          textToInsert +
-          value.slice(selection.end)
         clearSelection()
+        const next = burstSafeInsertText({
+          valueRef: latestValueRef,
+          cursorRef: latestCursorRef,
+          textToInsert,
+          replaceRange: selection,
+        })
         onChange({
-          text: newValue,
-          cursorPosition: selection.start + textToInsert.length,
+          text: next.text,
+          cursorPosition: next.cursorPosition,
           lastEditDueToNav: false,
         })
         return
       }
 
       // No selection, insert at cursor
-      const newValue =
-        value.slice(0, cursorPosition) +
-        textToInsert +
-        value.slice(cursorPosition)
+      const next = burstSafeInsertText({
+        valueRef: latestValueRef,
+        cursorRef: latestCursorRef,
+        textToInsert,
+        replaceRange: null,
+      })
       onChange({
-        text: newValue,
-        cursorPosition: cursorPosition + textToInsert.length,
+        text: next.text,
+        cursorPosition: next.cursorPosition,
         lastEditDueToNav: false,
       })
     },
-    [cursorPosition, onChange, value, getSelectionRange, clearSelection],
+    [onChange, getSelectionRange, clearSelection],
   )
 
   const moveCursor = useCallback(
@@ -949,6 +969,17 @@ export const MultilineInput = forwardRef<
         isPrintableCharacterKey(key)
       ) {
         preventKeyDefault(key)
+        
+        // Debug logging for Chinese input - helps identify issues with multi-byte characters
+        if (key.sequence.length > 1) {
+          logger.debug('Multi-byte input received:', {
+            sequence: key.sequence,
+            length: key.sequence.length,
+            chars: key.sequence.split('').map(c => c.charCodeAt(0).toString(16)),
+            name: key.name,
+          })
+        }
+        
         insertTextAtCursor(key.sequence)
         return true
       }
