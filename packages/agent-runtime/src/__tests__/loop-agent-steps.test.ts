@@ -1,6 +1,6 @@
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
-import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
+import { createTestAgentRuntimeParams } from '@codebuff/common/testing/fixtures/agent-runtime'
 import {
   clearMockedModules,
   mockModule,
@@ -21,33 +21,22 @@ import {
 } from 'bun:test'
 import { z } from 'zod/v4'
 
-import { disableLiveUserInputCheck } from '../live-user-inputs'
 import { loopAgentSteps } from '../run-agent-step'
 import { clearAgentGeneratorCache } from '../run-programmatic-step'
 import { createToolCallChunk, mockFileContext } from './test-utils'
 
 import type { AgentTemplate } from '../templates/types'
 import type { StepGenerator } from '@codebuff/common/types/agent-template'
-import type {
-  AgentRuntimeDeps,
-  AgentRuntimeScopedDeps,
-} from '@codebuff/common/types/contracts/agent-runtime'
-import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { AgentState } from '@codebuff/common/types/session-state'
 
 describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => {
   let mockTemplate: AgentTemplate
   let mockAgentState: AgentState
   let llmCallCount: number
-  let agentRuntimeImpl: AgentRuntimeDeps & AgentRuntimeScopedDeps
-  let loopAgentStepsBaseParams: ParamsExcluding<
-    typeof loopAgentSteps,
-    'localAgentTemplates' | 'agentType'
-  >
+  let agentRuntimeImpl: any
+  let loopAgentStepsBaseParams: any
 
   beforeAll(async () => {
-    disableLiveUserInputCheck()
-
     // Mock bigquery
     await mockModule('@codebuff/bigquery', () => ({
       insertTrace: () => {},
@@ -55,8 +44,14 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
   })
 
   beforeEach(() => {
+    const {
+      agentTemplate: _agentTemplate,
+      localAgentTemplates: _localAgentTemplates,
+      ...baseRuntimeParams
+    } = createTestAgentRuntimeParams()
+
     agentRuntimeImpl = {
-      ...TEST_AGENT_RUNTIME_IMPL,
+      ...baseRuntimeParams,
       sendAction: () => {},
       requestFiles: async () => ({}),
     }
@@ -86,7 +81,6 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
     }
 
     // Mock analytics
-    spyOn(analytics, 'initAnalytics').mockImplementation(() => {})
     spyOn(analytics, 'trackEvent').mockImplementation(() => {})
 
     // Mock crypto.randomUUID
@@ -147,7 +141,12 @@ describe('loopAgentSteps - runAgentStep vs runProgrammaticStep behavior', () => 
   afterEach(() => {
     clearAgentGeneratorCache(agentRuntimeImpl)
     mock.restore()
-    agentRuntimeImpl = { ...TEST_AGENT_RUNTIME_IMPL }
+    const {
+      agentTemplate: _agentTemplate,
+      localAgentTemplates: _localAgentTemplates,
+      ...baseRuntimeParams
+    } = createTestAgentRuntimeParams()
+    agentRuntimeImpl = { ...baseRuntimeParams }
   })
 
   afterAll(() => {

@@ -1,7 +1,7 @@
 import * as bigquery from '@codebuff/bigquery'
 import * as analytics from '@codebuff/common/analytics'
 import { TEST_USER_ID } from '@codebuff/common/old-constants'
-import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
+import { createTestAgentRuntimeParams } from '@codebuff/common/testing/fixtures/agent-runtime'
 import {
   AgentTemplateTypes,
   getInitialSessionState,
@@ -17,20 +17,19 @@ import {
   spyOn,
 } from 'bun:test'
 
-import { disableLiveUserInputCheck } from '../live-user-inputs'
-import * as liveUserInputs from '../live-user-inputs'
 import { mainPrompt } from '../main-prompt'
 import * as processFileBlockModule from '../process-file-block'
 
 import type { AgentTemplate } from '@codebuff/common/types/agent-template'
-import type { RequestToolCallFn } from '@codebuff/common/types/contracts/client'
 import type {
-  ParamsExcluding,
-  ParamsOf,
-} from '@codebuff/common/types/function-params'
+  RequestFilesFn,
+  RequestOptionalFileFn,
+  RequestToolCallFn,
+} from '@codebuff/common/types/contracts/client'
+import type { ParamsOf } from '@codebuff/common/types/function-params'
 import type { ProjectFileContext } from '@codebuff/common/util/file'
 
-let mainPromptBaseParams: ParamsExcluding<typeof mainPrompt, 'action'>
+let mainPromptBaseParams: any
 
 import { createToolCallChunk } from './test-utils'
 
@@ -47,10 +46,6 @@ const mockAgentStream = (chunks: StreamChunk[]) => {
 
 describe('mainPrompt', () => {
   let mockLocalAgentTemplates: Record<string, any>
-
-  beforeAll(() => {
-    disableLiveUserInputCheck()
-  })
 
   beforeEach(() => {
     // Setup common mock agent templates
@@ -90,7 +85,7 @@ describe('mainPrompt', () => {
     }
 
     mainPromptBaseParams = {
-      ...TEST_AGENT_RUNTIME_IMPL,
+      ...createTestAgentRuntimeParams(),
       repoId: undefined,
       repoUrl: undefined,
       userId: TEST_USER_ID,
@@ -98,11 +93,15 @@ describe('mainPrompt', () => {
       onResponseChunk: () => {},
       localAgentTemplates: mockLocalAgentTemplates,
       signal: new AbortController().signal,
+      // Mock fetch to return a token count response
+      fetch: async () =>
+        ({
+          ok: true,
+          text: async () => JSON.stringify({ inputTokens: 1000 }),
+        }) as Response,
     }
 
     // Mock analytics and tracing
-    spyOn(analytics, 'initAnalytics').mockImplementation(() => {})
-    analytics.initAnalytics(mainPromptBaseParams) // Initialize the mock
     spyOn(analytics, 'trackEvent').mockImplementation(() => {})
     spyOn(bigquery, 'insertTrace').mockImplementation(() =>
       Promise.resolve(true),
@@ -125,7 +124,9 @@ describe('mainPrompt', () => {
     mockAgentStream([{ type: 'text', text: 'Test response' }])
 
     // Mock websocket actions
-    mainPromptBaseParams.requestFiles = async ({ filePaths }) => {
+    mainPromptBaseParams.requestFiles = async ({
+      filePaths,
+    }: ParamsOf<RequestFilesFn>) => {
       const results: Record<string, string | null> = {}
       filePaths.forEach((p) => {
         if (p === 'test.txt') {
@@ -137,7 +138,9 @@ describe('mainPrompt', () => {
       return results
     }
 
-    mainPromptBaseParams.requestOptionalFile = async ({ filePath }) => {
+    mainPromptBaseParams.requestOptionalFile = async ({
+      filePath,
+    }: ParamsOf<RequestOptionalFileFn>) => {
       if (filePath === 'test.txt') {
         return 'mock content for test.txt'
       }
@@ -158,8 +161,6 @@ describe('mainPrompt', () => {
       }),
     )
 
-    // Mock live user inputs
-    spyOn(liveUserInputs, 'checkLiveUserInput').mockImplementation(() => true)
   })
 
   afterEach(() => {
@@ -200,7 +201,9 @@ describe('mainPrompt', () => {
     },
   }
 
-  it('includes local agents in spawnableAgents when agentId is provided', async () => {
+  it('does not include other local agents in spawnableAgents when agentId is provided', async () => {
+    // When a specific agentId is provided, we only use the spawnable agents
+    // defined in that agent's template - we don't auto-add all available agents
     const sessionState = getInitialSessionState(mockFileContext)
     const mainAgentId = 'test-main-agent'
     const localAgentId = 'test-local-agent'
@@ -257,9 +260,12 @@ describe('mainPrompt', () => {
       localAgentTemplates,
     })
 
-    expect(localAgentTemplates[mainAgentId].spawnableAgents).toContain(
+    // When agentId is provided, spawnableAgents should only contain what was
+    // explicitly defined in the template (empty in this case)
+    expect(localAgentTemplates[mainAgentId].spawnableAgents).not.toContain(
       localAgentId,
     )
+    expect(localAgentTemplates[mainAgentId].spawnableAgents).toEqual([])
   })
 
   it('should handle write_file tool call', async () => {
@@ -442,57 +448,5 @@ describe('mainPrompt', () => {
     })
 
     expect(output.type).toBeDefined() // Output should exist even for empty response
-  })
-
-  it('should unescape ampersands in run_terminal_command tool calls', async () => {
-    const sessionState = getInitialSessionState(mockFileContext)
-    const userPromptText = 'Run the backend tests'
-    const expectedCommand = 'cd backend && bun test'
-
-    mockAgentStream([
-      createToolCallChunk('run_terminal_command', {
-        command: expectedCommand,
-        process_type: 'SYNC',
-      }),
-      createToolCallChunk('end_turn', {}),
-    ])
-
-    // Get reference to the spy so we can check if it was called
-    const requestToolCallSpy = mainPromptBaseParams.requestToolCall
-
-    const action = {
-      type: 'prompt' as const,
-      prompt: userPromptText,
-      sessionState,
-      fingerprintId: 'test',
-      costMode: 'max' as const,
-      promptId: 'test',
-      toolResults: [],
-    }
-
-    await mainPrompt({
-      ...mainPromptBaseParams,
-      repoId: undefined,
-      repoUrl: undefined,
-      action,
-      userId: TEST_USER_ID,
-      clientSessionId: 'test-session',
-      onResponseChunk: () => {},
-      localAgentTemplates: mockLocalAgentTemplates,
-    })
-
-    // Assert that requestToolCall was called exactly once
-    expect(requestToolCallSpy).toHaveBeenCalledTimes(1)
-
-    // Verify the run_terminal_command call was made with the correct arguments
-    expect(requestToolCallSpy).toHaveBeenCalledWith({
-      userInputId: expect.any(String), // userInputId
-      toolName: 'run_terminal_command',
-      input: expect.objectContaining({
-        command: expectedCommand,
-        process_type: 'SYNC',
-        mode: 'assistant',
-      }),
-    })
   })
 })

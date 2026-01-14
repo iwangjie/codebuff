@@ -1,8 +1,9 @@
 import { useKeyboard } from '@opentui/react'
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 
 import { hasClipboardImage, readClipboardText, readClipboardImageFilePath, getImageFilePathFromText } from '../utils/clipboard-image'
 import { getProjectRoot } from '../project-files'
+import { reportActivity } from '../utils/activity-tracker'
 import {
   resolveChatKeyboardAction,
   type ChatKeyboardState,
@@ -11,6 +12,8 @@ import {
 
 import type { KeyEvent } from '@opentui/core'
 
+// Throttle interval for keyboard activity reporting (ms)
+const KEYBOARD_ACTIVITY_THROTTLE_MS = 1000
 
 /**
  * Handlers for chat keyboard actions.
@@ -71,6 +74,13 @@ export type ChatKeyboardHandlers = {
   onPasteImage: () => void
   onPasteImagePath: (imagePath: string) => void
   onPasteText: (text: string) => void
+
+  // Scroll handlers
+  onScrollUp: () => void
+  onScrollDown: () => void
+
+  // Out of credits handler
+  onOpenBuyCredits: () => void
 }
 
 /**
@@ -151,8 +161,13 @@ function dispatchAction(
     case 'mention-menu-complete':
       handlers.onMentionMenuComplete()
       return true
-    case 'open-file-menu-with-tab':
-      return handlers.onOpenFileMenuWithTab()
+    case 'open-file-menu-with-tab': {
+      const opened = handlers.onOpenFileMenuWithTab()
+      if (!opened) {
+        handlers.onToggleAgentMode()
+      }
+      return true
+    }
     case 'history-up':
       handlers.onHistoryUp()
       return true
@@ -218,6 +233,15 @@ function dispatchAction(
       }
       return true
     }
+    case 'scroll-up':
+      handlers.onScrollUp()
+      return true
+    case 'scroll-down':
+      handlers.onScrollDown()
+      return true
+    case 'open-buy-credits':
+      handlers.onOpenBuyCredits()
+      return true
     case 'none':
       return false
   }
@@ -245,10 +269,19 @@ export function useChatKeyboard({
   handlers,
   disabled = false,
 }: UseChatKeyboardOptions): void {
+  const lastKeyboardActivityRef = useRef<number>(0)
+
   useKeyboard(
     useCallback(
       (key: KeyEvent) => {
         if (disabled) return
+
+        // Report keyboard activity for activity-aware features (throttled)
+        const now = Date.now()
+        if (now - lastKeyboardActivityRef.current > KEYBOARD_ACTIVITY_THROTTLE_MS) {
+          lastKeyboardActivityRef.current = now
+          reportActivity()
+        }
 
         const action = resolveChatKeyboardAction(key, state)
         const handled = dispatchAction(action, handlers)

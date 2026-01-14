@@ -261,6 +261,111 @@ describe('extractSpawnAgentResultContent', () => {
     const result = extractSpawnAgentResultContent(undefined)
     expect(result.hasError).toBe(false)
   })
+
+  test('extracts text from lastMessage output mode with Message array', () => {
+    // This is the format returned by agents with outputMode: 'last_message'
+    const result = extractSpawnAgentResultContent({
+      type: 'lastMessage',
+      value: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Here are the research findings:' },
+            { type: 'text', text: ' Important information found.' },
+          ],
+        },
+      ],
+    })
+    expect(result).toEqual({
+      content: 'Here are the research findings: Important information found.',
+      hasError: false,
+    })
+  })
+
+  test('extracts text from multiple assistant messages in lastMessage output', () => {
+    const result = extractSpawnAgentResultContent({
+      type: 'lastMessage',
+      value: [
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'First message' }],
+        },
+        {
+          role: 'tool',
+          content: [{ type: 'json', value: {} }],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Second message' }],
+        },
+      ],
+    })
+    expect(result).toEqual({
+      content: 'First message\nSecond message',
+      hasError: false,
+    })
+  })
+
+  test('handles lastMessage with empty content array', () => {
+    const result = extractSpawnAgentResultContent({
+      type: 'lastMessage',
+      value: [
+        {
+          role: 'assistant',
+          content: [],
+        },
+      ],
+    })
+    expect(result).toEqual({ content: '', hasError: false })
+  })
+
+  test('handles lastMessage with no assistant messages', () => {
+    const result = extractSpawnAgentResultContent({
+      type: 'lastMessage',
+      value: [
+        {
+          role: 'tool',
+          content: [{ type: 'json', value: {} }],
+        },
+      ],
+    })
+    expect(result).toEqual({ content: '', hasError: false })
+  })
+
+  test('handles allMessages output mode', () => {
+    const result = extractSpawnAgentResultContent({
+      type: 'allMessages',
+      value: [
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'First response' }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Follow up' }],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Second response' }],
+        },
+      ],
+    })
+    expect(result).toEqual({
+      content: 'First response\nSecond response',
+      hasError: false,
+    })
+  })
+
+  test('handles structuredOutput with message field', () => {
+    const result = extractSpawnAgentResultContent({
+      type: 'structuredOutput',
+      value: { message: 'Structured output message' },
+    })
+    expect(result).toEqual({
+      content: 'Structured output message',
+      hasError: false,
+    })
+  })
 })
 
 describe('appendInterruptionNotice', () => {

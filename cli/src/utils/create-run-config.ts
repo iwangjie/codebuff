@@ -1,8 +1,4 @@
-import {
-  MAX_RETRIES_PER_MESSAGE,
-  RETRY_BACKOFF_BASE_DELAY_MS,
-  RETRY_BACKOFF_MAX_DELAY_MS,
-} from '@codebuff/sdk'
+import path from 'path'
 
 import {
   createEventHandler,
@@ -10,9 +6,13 @@ import {
 } from './sdk-event-handlers'
 
 import type { EventHandlerState } from './sdk-event-handlers'
-import type { AgentDefinition, MessageContent, RunState } from '@codebuff/sdk'
 import type { Logger } from '@codebuff/common/types/contracts/logger'
-import type { StreamStatus } from '../hooks/use-message-queue'
+import type {
+  AgentDefinition,
+  FileFilter,
+  MessageContent,
+  RunState,
+} from '@codebuff/sdk'
 
 export type CreateRunConfigParams = {
   logger: Logger
@@ -20,22 +20,73 @@ export type CreateRunConfigParams = {
   prompt: string
   content: MessageContent[] | undefined
   previousRunState: RunState | null
-  abortController: AbortController
   agentDefinitions: AgentDefinition[]
   eventHandlerState: EventHandlerState
-  setIsRetrying: (retrying: boolean) => void
-  setStreamStatus: (status: StreamStatus) => void
+  signal: AbortSignal
 }
 
-type RetryArgs = {
-  attempt: number
-  delayMs: number
-  errorCode?: string
+const SENSITIVE_EXTENSIONS = new Set([
+  '.pem',
+  '.key',
+  '.p12',
+  '.pfx',
+  '.jks',
+  '.keystore',
+  '.crt',
+  '.cer',
+])
+const SENSITIVE_BASENAMES = new Set([
+  '.htpasswd',
+  '.netrc',
+  'credentials',
+  '.npmrc',
+  '.yarnrc',
+  '.yarnrc.yml',
+  'auth.json',
+  '.pypirc',
+  'terraform.tfvars',
+  '.terraformrc',
+])
+
+// Pattern matches (grouped by match type)
+const SENSITIVE_PATTERNS = {
+  prefix: ['id_rsa', 'id_ed25519', 'id_dsa', 'id_ecdsa'], // SSH private keys
+  suffix: ['_credentials'],
+  substring: ['kubeconfig', '.tfstate'],
 }
 
-type RetryExhaustedArgs = {
-  totalAttempts: number
-  errorCode?: string
+const isEnvFile = (basename: string) =>
+  (basename === '.env' || basename.startsWith('.env.')) &&
+  !isEnvTemplateFile(basename)
+
+const matchesPattern = (str: string) =>
+  SENSITIVE_PATTERNS.prefix.some(
+    (p) => str.startsWith(p) && !str.endsWith('.pub'),
+  ) ||
+  SENSITIVE_PATTERNS.suffix.some((s) => str.endsWith(s)) ||
+  SENSITIVE_PATTERNS.substring.some((sub) => str.includes(sub))
+
+const ENV_TEMPLATE_SUFFIXES = ['.env.example', '.env.sample', '.env.template']
+
+export const isEnvTemplateFile = (filePath: string) =>
+  ENV_TEMPLATE_SUFFIXES.some((suffix) =>
+    path.basename(filePath).endsWith(suffix),
+  )
+
+/**
+ * Check if a file is a sensitive file that should be blocked from reading.
+ */
+export function isSensitiveFile(filePath: string): boolean {
+  const basename = path.basename(filePath)
+  const basenameLower = basename.toLowerCase()
+  const ext = path.extname(filePath).toLowerCase()
+
+  return (
+    isEnvFile(basename) ||
+    SENSITIVE_EXTENSIONS.has(ext) ||
+    SENSITIVE_BASENAMES.has(basename) ||
+    matchesPattern(basenameLower)
+  )
 }
 
 export const createRunConfig = (params: CreateRunConfigParams) => {
@@ -45,11 +96,8 @@ export const createRunConfig = (params: CreateRunConfigParams) => {
     prompt,
     content,
     previousRunState,
-    abortController,
     agentDefinitions,
     eventHandlerState,
-    setIsRetrying,
-    setStreamStatus,
   } = params
 
   return {
@@ -58,29 +106,15 @@ export const createRunConfig = (params: CreateRunConfigParams) => {
     prompt,
     content,
     previousRun: previousRunState ?? undefined,
-    abortController,
-    retry: {
-      maxRetries: MAX_RETRIES_PER_MESSAGE,
-      backoffBaseMs: RETRY_BACKOFF_BASE_DELAY_MS,
-      backoffMaxMs: RETRY_BACKOFF_MAX_DELAY_MS,
-      onRetry: async ({ attempt, delayMs, errorCode }: RetryArgs) => {
-        logger.warn(
-          { sdkAttempt: attempt, delayMs, errorCode },
-          'SDK retrying after error',
-        )
-        setIsRetrying(true)
-        setStreamStatus('waiting')
-      },
-      onRetryExhausted: async ({
-        totalAttempts,
-        errorCode,
-      }: RetryExhaustedArgs) => {
-        logger.warn({ totalAttempts, errorCode }, 'SDK exhausted all retries')
-      },
-    },
     agentDefinitions,
     maxAgentSteps: 100,
     handleStreamChunk: createStreamChunkHandler(eventHandlerState),
     handleEvent: createEventHandler(eventHandlerState),
+    signal: params.signal,
+    fileFilter: ((filePath: string) => {
+      if (isSensitiveFile(filePath)) return { status: 'blocked' }
+      if (isEnvTemplateFile(filePath)) return { status: 'allow-example' }
+      return { status: 'allow' }
+    }) satisfies FileFilter,
   }
 }

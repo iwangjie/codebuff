@@ -1,25 +1,33 @@
+import { E2E_MOCK_API_KEY, setupE2eMocks } from './e2e-mocks'
+
+const shouldRunLiveE2e = process.env.RUN_CODEBUFF_E2E === 'true'
+
 /**
  * Utility to load Codebuff API key from environment or user credentials.
+ * Defaults to a mock key for deterministic local runs.
  */
-
 export function getApiKey(): string {
-  const apiKey = process.env.CODEBUFF_API_KEY
-
-  if (!apiKey) {
-    throw new Error(
-      'CODEBUFF_API_KEY environment variable is required for e2e tests. ' +
-        'Get your API key at https://www.codebuff.com/api-keys',
-    )
+  if (shouldRunLiveE2e) {
+    const apiKey = process.env.CODEBUFF_API_KEY
+    if (!apiKey) {
+      throw new Error(
+        'CODEBUFF_API_KEY environment variable is required for live e2e tests. ' +
+          'Get your API key at https://www.codebuff.com/api-keys',
+      )
+    }
+    return apiKey
   }
 
-  return apiKey
+  setupE2eMocks()
+  process.env.CODEBUFF_API_KEY = E2E_MOCK_API_KEY
+  return E2E_MOCK_API_KEY
 }
 
 /**
- * Skip test if no API key is available (for CI environments without credentials).
+ * E2E tests should always run; use mock mode when not opted-in.
  */
 export function skipIfNoApiKey(): boolean {
-  return !process.env.CODEBUFF_API_KEY
+  return false
 }
 
 /**
@@ -39,14 +47,21 @@ export function isAuthError(output: {
 }
 
 /**
- * Check if output indicates a network error (e.g., backend unreachable).
+ * Check if output indicates a network error (e.g., backend unreachable, timeout, rate limit).
  */
 export function isNetworkError(output: {
   type: string
   message?: string
-  errorCode?: string
+  statusCode?: number
 }): boolean {
   if (output.type !== 'error') return false
   const msg = output.message?.toLowerCase() ?? ''
-  return output.errorCode === 'NETWORK_ERROR' || msg.includes('network error')
+  // Check for retryable status codes (408 timeout, 429 rate limit, 5xx server errors)
+  // or network-related messages
+  const isRetryableStatusCode =
+    output.statusCode !== undefined &&
+    (output.statusCode === 408 ||
+      output.statusCode === 429 ||
+      output.statusCode >= 500)
+  return isRetryableStatusCode || msg.includes('network error')
 }

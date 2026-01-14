@@ -1,4 +1,6 @@
+import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { RECONNECTION_MESSAGE_DURATION_MS } from '@codebuff/sdk'
+import open from 'open'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   useCallback,
@@ -10,8 +12,12 @@ import {
 } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 
+import { getAdsEnabled } from './commands/ads'
 import { routeUserPrompt, addBashMessageToHistory } from './commands/router'
+import { AdBanner } from './components/ad-banner'
 import { ChatInputBar } from './components/chat-input-bar'
+import { BottomStatusLine } from './components/bottom-status-line'
+import { areCreditsRestored } from './components/out-of-credits-banner'
 import { LoadPreviousButton } from './components/load-previous-button'
 import { MessageWithAgents } from './components/message-with-agents'
 import { PendingBashMessage } from './components/pending-bash-message'
@@ -22,6 +28,7 @@ import { useAgentValidation } from './hooks/use-agent-validation'
 import { useAskUserBridge } from './hooks/use-ask-user-bridge'
 import { authQueryKeys } from './hooks/use-auth-query'
 import { useChatInput } from './hooks/use-chat-input'
+import { useClaudeQuotaQuery } from './hooks/use-claude-quota-query'
 import {
   useChatKeyboard,
   type ChatKeyboardHandlers,
@@ -29,6 +36,7 @@ import {
 import { useClipboard } from './hooks/use-clipboard'
 import { useConnectionStatus } from './hooks/use-connection-status'
 import { useElapsedTime } from './hooks/use-elapsed-time'
+import { useGravityAd } from './hooks/use-gravity-ad'
 import { useEvent } from './hooks/use-event'
 import { useExitHandler } from './hooks/use-exit-handler'
 import { useInputHistory } from './hooks/use-input-history'
@@ -44,8 +52,10 @@ import { useTerminalLayout } from './hooks/use-terminal-layout'
 import { useTheme } from './hooks/use-theme'
 import { useTimeout } from './hooks/use-timeout'
 import { useUsageMonitor } from './hooks/use-usage-monitor'
+import { WEBSITE_URL } from './login/constants'
 import { getProjectRoot } from './project-files'
 import { useChatStore } from './state/chat-store'
+import { useChatHistoryStore } from './state/chat-history-store'
 import { useFeedbackStore } from './state/feedback-store'
 import { usePublishStore } from './state/publish-store'
 import {
@@ -67,9 +77,12 @@ import {
   getStatusIndicatorState,
   type AuthStatus,
 } from './utils/status-indicator-state'
+import { getClaudeOAuthStatus } from './utils/claude-oauth'
 import { createPasteHandler } from './utils/strings'
 import { computeInputLayoutMetrics } from './utils/text-layout'
 import { createMarkdownPalette } from './utils/theme-system'
+import { reportActivity } from './utils/activity-tracker'
+import { trackEvent } from './utils/analytics'
 
 import type { CommandResult } from './commands/command-registry'
 import type { MultilineInputHandle } from './components/multiline-input'
@@ -95,6 +108,8 @@ export const Chat = ({
   continueChatId,
   authStatus,
   initialMode,
+  gitRoot,
+  onSwitchToGitRoot,
 }: {
   headerContent: React.ReactNode
   initialPrompt: string | null
@@ -108,6 +123,8 @@ export const Chat = ({
   continueChatId?: string
   authStatus: AuthStatus
   initialMode?: AgentMode
+  gitRoot?: string | null
+  onSwitchToGitRoot?: () => void
 }) => {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const [hasOverflow, setHasOverflow] = useState(false)
@@ -154,7 +171,7 @@ export const Chat = ({
     setSlashSelectedIndex,
     agentSelectedIndex,
     setAgentSelectedIndex,
-    streamingAgents,
+    streamingAgents: rawStreamingAgents,
     focusedAgentId,
     setFocusedAgentId,
     messages,
@@ -189,6 +206,16 @@ export const Chat = ({
       toggleAgentMode: store.toggleAgentMode,
       isRetrying: store.isRetrying,
     })),
+  )
+
+  // Stabilize streamingAgents reference - only create new Set when content changes
+  const streamingAgentsKey = useMemo(
+    () => Array.from(rawStreamingAgents).sort().join(','),
+    [rawStreamingAgents],
+  )
+  const streamingAgents = useMemo(
+    () => rawStreamingAgents,
+    [streamingAgentsKey],
   )
   const pendingBashMessages = useChatStore((state) => state.pendingBashMessages)
 
@@ -226,6 +253,8 @@ export const Chat = ({
 
   const isConnected = useConnectionStatus(handleReconnection)
   const mainAgentTimer = useElapsedTime()
+  const { ad } = useGravityAd()
+  // Use startTime for active timer display; when paused, timer hook maintains frozen value
   const timerStartTime = mainAgentTimer.startTime
 
   // Set initial mode from CLI flag on mount
@@ -282,7 +311,7 @@ export const Chat = ({
           ): ContentBlock[] => {
             let foundTarget = false
             const result = blocks.map((block) => {
-              // Handle thinking blocks (grouped text blocks)
+              // Handle thinking blocks - just match by thinkingId
               if (block.type === 'text' && block.thinkingId === id) {
                 foundTarget = true
                 const wasCollapsed = block.isCollapsed ?? false
@@ -326,7 +355,7 @@ export const Chat = ({
                 }
               }
 
-              // Recursively update nested blocks
+              // Recursively update nested blocks inside agent blocks
               if (block.type === 'agent' && block.blocks) {
                 const updatedBlocks = updateBlocksRecursively(block.blocks)
                 // Only create new block if nested blocks actually changed
@@ -365,7 +394,7 @@ export const Chat = ({
     return isUserCollapsingRef.current
   }, [])
 
-  const { scrollToLatest, scrollboxProps, isAtBottom } = useChatScrollbox(
+  const { scrollToLatest, scrollUp, scrollDown, scrollboxProps, isAtBottom } = useChatScrollbox(
     scrollRef,
     messages,
     isUserCollapsing,
@@ -411,6 +440,25 @@ export const Chat = ({
   const setInputMode = useChatStore((state) => state.setInputMode)
   const askUserState = useChatStore((state) => state.askUserState)
 
+  // Pause/resume timer when ask_user tool becomes active/inactive
+  useEffect(() => {
+    if (askUserState !== null) {
+      mainAgentTimer.pause()
+    } else if (mainAgentTimer.isPaused) {
+      mainAgentTimer.resume()
+    }
+  }, [askUserState, mainAgentTimer])
+
+  // Filter slash commands based on current ads state - only show the option that changes state
+  const filteredSlashCommands = useMemo(() => {
+    const adsEnabled = getAdsEnabled()
+    return SLASH_COMMANDS.filter((cmd) => {
+      if (cmd.id === 'ads:enable') return !adsEnabled
+      if (cmd.id === 'ads:disable') return adsEnabled
+      return true
+    })
+  }, [inputValue]) // Re-evaluate when input changes (user may have just toggled)
+
   const {
     slashContext,
     mentionContext,
@@ -424,7 +472,7 @@ export const Chat = ({
     disableAgentSuggestions: forceFileOnlyMentions || inputMode !== 'default',
     inputValue: inputMode === 'bash' ? '' : inputValue,
     cursorPosition,
-    slashCommands: SLASH_COMMANDS,
+    slashCommands: filteredSlashCommands,
     localAgents,
     fileTree,
     currentAgentMode: agentMode,
@@ -435,6 +483,19 @@ export const Chat = ({
       setForceFileOnlyMentions(false)
     }
   }, [mentionContext.active])
+
+  // Track when slash menu is activated
+  const prevSlashActiveRef = useRef(false)
+  useEffect(() => {
+    if (slashContext.active && !prevSlashActiveRef.current) {
+      trackEvent(AnalyticsEvent.SLASH_MENU_ACTIVATED, {
+        queryLength: slashContext.query.length,
+        matchCount: slashMatches.length,
+        inputLength: inputValue.length,
+      })
+    }
+    prevSlashActiveRef.current = slashContext.active
+  }, [slashContext.active, slashContext.query, slashMatches.length, inputValue.length])
 
   // Reset suggestion menu indexes when context changes
   useEffect(() => {
@@ -832,6 +893,10 @@ export const Chat = ({
           openPublishMode()
         }
       }
+
+      if (result.openChatHistory) {
+        useChatHistoryStore.getState().openChatHistory()
+      }
     },
     [
       saveCurrentInput,
@@ -867,6 +932,17 @@ export const Chat = ({
   const cursorPositionRef = useRef(cursorPosition)
   useEffect(() => {
     inputValueRef.current = inputValue
+  }, [inputValue])
+
+  // Report activity on input changes for ad rotation (debounced via separate effect)
+  const lastReportedActivityRef = useRef<number>(0)
+  useEffect(() => {
+    const now = Date.now()
+    // Throttle to max once per second to avoid excessive calls
+    if (now - lastReportedActivityRef.current > 1000) {
+      lastReportedActivityRef.current = now
+      reportActivity()
+    }
   }, [inputValue])
   useEffect(() => {
     cursorPositionRef.current = cursorPosition
@@ -940,6 +1016,8 @@ export const Chat = ({
   }, [feedbackMode, askUserState, inputRef])
 
   const handleSubmit = useCallback(async () => {
+    // Report activity for ad rotation
+    reportActivity()
     const result = await onSubmitPrompt(inputValue, agentMode)
     handleCommandResult(result)
   }, [onSubmitPrompt, inputValue, agentMode, handleCommandResult])
@@ -1197,6 +1275,17 @@ export const Chat = ({
           }
         })
       },
+      onScrollUp: scrollUp,
+      onScrollDown: scrollDown,
+      onOpenBuyCredits: () => {
+        // If credits have been restored, just return to default mode
+        if (areCreditsRestored()) {
+          setInputMode('default')
+          return
+        }
+        // Otherwise open the buy credits page
+        open(WEBSITE_URL + '/usage')
+      },
     }),
     [
       setInputMode,
@@ -1227,6 +1316,8 @@ export const Chat = ({
       inputRef,
       handleCtrlC,
       clearQueue,
+      scrollUp,
+      scrollDown,
     ],
   )
 
@@ -1301,6 +1392,15 @@ export const Chat = ({
     isAskUserActive: askUserState !== null,
   })
   const hasStatusIndicatorContent = statusIndicatorState.kind !== 'idle'
+
+  const isClaudeOAuthActive = getClaudeOAuthStatus().connected
+
+  // Fetch Claude quota when OAuth is active
+  const { data: claudeQuota } = useClaudeQuotaQuery({
+    enabled: isClaudeOAuthActive,
+    refetchInterval: 60 * 1000, // Refetch every 60 seconds
+  })
+
   const inputBoxTitle = useMemo(() => {
     const segments: string[] = []
 
@@ -1321,8 +1421,23 @@ export const Chat = ({
     !feedbackMode &&
     (hasStatusIndicatorContent || shouldShowQueuePreview || !isAtBottom)
 
+  // Determine if Claude is actively streaming/waiting
+  const isClaudeActive = isStreaming || isWaitingForResponse
+
+  // Track mouse movement for ad activity (throttled)
+  const lastMouseActivityRef = useRef<number>(0)
+  const handleMouseActivity = useCallback(() => {
+    const now = Date.now()
+    // Throttle to max once per second
+    if (now - lastMouseActivityRef.current > 1000) {
+      lastMouseActivityRef.current = now
+      reportActivity()
+    }
+  }, [])
+
   return (
     <box
+      onMouseMove={handleMouseActivity}
       style={{
         flexDirection: 'column',
         gap: 0,
@@ -1368,7 +1483,7 @@ export const Chat = ({
           },
         }}
       >
-        <TopBanner />
+        <TopBanner gitRoot={gitRoot} onSwitchToGitRoot={onSwitchToGitRoot} />
 
         {headerContent}
         {hiddenMessageCount > 0 && (
@@ -1425,6 +1540,8 @@ export const Chat = ({
           />
         )}
 
+        {ad && getAdsEnabled() && <AdBanner ad={ad} />}
+
         <ChatInputBar
           inputValue={inputValue}
           cursorPosition={cursorPosition}
@@ -1467,6 +1584,12 @@ export const Chat = ({
             onPasteImagePath: chatKeyboardHandlers.onPasteImagePath,
             cwd: getProjectRoot() ?? process.cwd(),
           })}
+        />
+
+        <BottomStatusLine
+          isClaudeConnected={isClaudeOAuthActive}
+          isClaudeActive={isClaudeActive}
+          claudeQuota={claudeQuota}
         />
       </box>
     </box>

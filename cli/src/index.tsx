@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 
-import { promises as fs } from 'fs'
+import fs from 'fs'
 import { createRequire } from 'module'
 import os from 'os'
+import path from 'path'
 
+import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
 import { getProjectFileTree } from '@codebuff/common/project-file-tree'
 import { createCliRenderer } from '@opentui/core'
 import { createRoot } from '@opentui/react'
@@ -20,13 +22,15 @@ import { App } from './app'
 import { handlePublish } from './commands/publish'
 import { initializeApp } from './init/init-app'
 import { getProjectRoot, setProjectRoot } from './project-files'
-import { initAnalytics } from './utils/analytics'
+import { initAnalytics, trackEvent } from './utils/analytics'
 import { getAuthTokenDetails } from './utils/auth'
+import { resetCodebuffClient } from './utils/codebuff-client'
 import { getCliEnv } from './utils/env'
-import { findGitRoot } from './utils/git'
 import { initializeAgentRegistry } from './utils/local-agent-registry'
 import { clearLogFile, logger } from './utils/logger'
+import { shouldShowProjectPicker } from './utils/project-picker'
 import { saveRecentProject } from './utils/recent-projects'
+import { installProcessCleanupHandlers } from './utils/renderer-cleanup'
 import { detectTerminalTheme } from './utils/terminal-color-detection'
 import { setOscDetectedTheme } from './utils/theme-system'
 
@@ -99,7 +103,7 @@ function parseArgs(): ParsedArgs {
     .version(loadPackageVersion(), '-v, --version', 'Print the CLI version')
     .option(
       '--agent <agent-id>',
-      'Specify which agent to use (e.g., "base", "ask", "file-picker")',
+      'Run a specific agent id (skips loading local .agents overrides)',
     )
     .option('--clear-logs', 'Remove any existing CLI log files before starting')
     .option(
@@ -168,28 +172,33 @@ async function main(): Promise<void> {
     initialMode,
   } = parseArgs()
 
+  const isPublishCommand = process.argv.includes('publish')
+  const hasAgentOverride = Boolean(agent && agent.trim().length > 0)
+
   await initializeApp({ cwd })
 
-  // Detect if user is at home directory or outside a project (should show project picker)
+  // Show project picker only when user starts at the home directory or an ancestor
   const projectRoot = getProjectRoot()
   const homeDir = os.homedir()
-  const gitRoot = findGitRoot({ cwd: projectRoot })
-  const showProjectPicker =
-    projectRoot === '/' || projectRoot === homeDir || gitRoot === null
+  const startCwd = process.cwd()
+  const showProjectPicker = shouldShowProjectPicker(startCwd, homeDir)
 
-  // Initialize agent registry (loads user agents via SDK)
-  await initializeAgentRegistry()
+  // Initialize agent registry (loads user agents via SDK).
+  // When --agent is provided, skip local .agents to avoid overrides.
+  if (isPublishCommand || !hasAgentOverride) {
+    await initializeAgentRegistry()
+  }
 
   // Handle publish command before rendering the app
-  if (process.argv.includes('publish')) {
+  if (isPublishCommand) {
     const publishIndex = process.argv.indexOf('publish')
     const agentIds = process.argv.slice(publishIndex + 1)
     const result = await handlePublish(agentIds)
 
     if (result.success && result.publisherId && result.agents) {
-      console.log(green('✅ Successfully published:'))
+      logger.info(green('✅ Successfully published:'))
       for (const agent of result.agents) {
-        console.log(
+        logger.info(
           cyan(
             `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
           ),
@@ -197,10 +206,10 @@ async function main(): Promise<void> {
       }
       process.exit(0)
     } else {
-      console.log(red('❌ Publish failed'))
-      if (result.error) console.log(red(`Error: ${result.error}`))
-      if (result.details) console.log(red(result.details))
-      if (result.hint) console.log(yellow(`Hint: ${result.hint}`))
+      logger.error(red('❌ Publish failed'))
+      if (result.error) logger.error(red(`Error: ${result.error}`))
+      if (result.details) logger.error(red(result.details))
+      if (result.hint) logger.warn(yellow(`Hint: ${result.hint}`))
       process.exit(1)
     }
   }
@@ -208,6 +217,17 @@ async function main(): Promise<void> {
   // Initialize analytics
   try {
     initAnalytics()
+
+    // Track app launch event
+    trackEvent(AnalyticsEvent.APP_LAUNCHED, {
+      version: loadPackageVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      hasInitialPrompt: Boolean(initialPrompt),
+      hasAgentOverride: hasAgentOverride,
+      continueChat,
+      initialMode: initialMode ?? 'DEFAULT',
+    })
   } catch (error) {
     // Analytics initialization is optional - don't fail the app if it errors
     logger.debug(error, 'Failed to initialize analytics')
@@ -247,7 +267,7 @@ async function main(): Promise<void> {
         if (root) {
           const tree = await getProjectFileTree({
             projectRoot: root,
-            fs: fs,
+            fs: fs.promises,
           })
           logger.info({ tree }, 'Loaded file tree')
           setFileTree(tree)
@@ -264,10 +284,22 @@ async function main(): Promise<void> {
     // Callback for when user selects a new project from the picker
     const handleProjectChange = React.useCallback(
       async (newProjectPath: string) => {
+        const previousPath = process.cwd()
         // Change process working directory
         process.chdir(newProjectPath)
+
+        // Track directory change (avoid logging full paths for privacy)
+        const isGitRepo = fs.existsSync(path.join(newProjectPath, '.git'))
+        const pathDepth = newProjectPath.split(path.sep).filter(Boolean).length
+        trackEvent(AnalyticsEvent.CHANGE_DIRECTORY, {
+          isGitRepo,
+          pathDepth,
+          isHomeDir: newProjectPath === os.homedir(),
+        })
         // Update the project root in the module state
         setProjectRoot(newProjectPath)
+        // Reset client to ensure tools use the updated project root
+        resetCodebuffClient()
         // Save to recent projects list
         saveRecentProject(newProjectPath)
         // Update local state
@@ -300,6 +332,7 @@ async function main(): Promise<void> {
     backgroundColor: 'transparent',
     exitOnCtrlC: false,
   })
+  installProcessCleanupHandlers(renderer)
   createRoot(renderer).render(
     <QueryClientProvider client={queryClient}>
       <AppWithAsyncAuth />

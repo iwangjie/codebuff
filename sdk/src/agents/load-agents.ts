@@ -23,6 +23,66 @@ export type LoadedAgentDefinition = AgentDefinition & {
 export type LoadedAgents = Record<string, LoadedAgentDefinition>
 
 /**
+ * Resolves environment variable references in MCP server configs.
+ * Values starting with `$` are treated as env var references (e.g., `'$NOTION_TOKEN'`).
+ *
+ * @param env - The env object from MCP config with possible $VAR_NAME references
+ * @param agentId - The agent ID for error messages
+ * @param mcpServerName - The MCP server name for error messages
+ * @returns Resolved env object with all $VAR_NAME values replaced with actual values
+ * @throws Error if a referenced environment variable is missing
+ */
+export function resolveMcpEnv(
+  env: Record<string, string> | undefined,
+  agentId: string,
+  mcpServerName: string,
+): Record<string, string> {
+  if (!env) return {}
+
+  const resolved: Record<string, string> = {}
+
+  for (const [key, value] of Object.entries(env)) {
+    if (value.startsWith('$')) {
+      // $VAR_NAME reference - resolve from process.env
+      const envVarName = value.slice(1) // Remove the leading $
+      // Allow dynamic process.env access
+      const envName = 'env'
+      const envValue = process[envName][envVarName]
+
+      if (envValue === undefined) {
+        throw new Error(
+          `Missing environment variable '${envVarName}' required by agent '${agentId}' in mcpServers.${mcpServerName}.env.${key}`,
+        )
+      }
+
+      resolved[key] = envValue
+    } else {
+      // Plain string value - use as-is
+      resolved[key] = value
+    }
+  }
+
+  return resolved
+}
+
+/**
+ * Resolves all MCP server env references in an agent definition.
+ * Mutates the mcpServers object to replace $VAR_NAME references with resolved values.
+ *
+ * @param agent - The agent definition to process
+ * @throws Error if any referenced environment variable is missing
+ */
+export function resolveAgentMcpEnv(agent: AgentDefinition): void {
+  if (!agent.mcpServers) return
+
+  for (const [serverName, config] of Object.entries(agent.mcpServers)) {
+    if ('command' in config && config.env) {
+      config.env = resolveMcpEnv(config.env, agent.id, serverName)
+    }
+  }
+}
+
+/**
  * Validation error for an agent that failed validation.
  */
 export type AgentValidationError = {
@@ -183,6 +243,16 @@ export async function loadLocalAgents({
           agentDefinition.handleSteps.toString()
       }
 
+      // Resolve $env references in MCP server configs
+      try {
+        resolveAgentMcpEnv(processedAgentDefinition)
+      } catch (error) {
+        if (verbose) {
+          console.error(error instanceof Error ? error.message : String(error))
+        }
+        continue
+      }
+
       agents[processedAgentDefinition.id] = processedAgentDefinition
     } catch (error) {
       if (verbose) {
@@ -264,132 +334,58 @@ async function transpileAgent(
   fullPath: string,
   verbose: boolean,
 ): Promise<string | null> {
-  try {
-    let buildFn: typeof import('esbuild')['build'] | null = null
-    const canUseBunBuild =
-      typeof Bun !== 'undefined' && typeof Bun.build === 'function'
-    try {
-      const esbuildModule = await import('esbuild')
-      buildFn = esbuildModule.build
-    } catch {
-      // esbuild not available (likely running in compiled binary)
-    }
+  const canUseBunBuild =
+    typeof Bun !== 'undefined' && typeof Bun.build === 'function'
 
-    const hash = createHash('sha1').update(fullPath).digest('hex')
-    // Store compiled agents inside the current project so node module resolution
-    // can find dependencies (e.g. lodash, zod/v4) via parent node_modules.
-    const tempDir = path.join(process.cwd(), '.codebuff', 'agents')
-    const compiledPath = path.join(tempDir, `${hash}.mjs`)
-
-    const buildWithBun = async (): Promise<string | null> => {
-      if (!canUseBunBuild) {
-        return null
-      }
-      const result = await Bun.build({
-        entrypoints: [fullPath],
-        outdir: tempDir,
-        target: 'node',
-        format: 'esm',
-        sourcemap: 'inline',
-        splitting: false,
-        minify: false,
-        root: process.cwd(),
-        packages: 'external',
-        external: [
-          ...builtinModules,
-          ...builtinModules.map((mod) => `node:${mod}`),
-        ],
-        throw: false,
-      })
-
-      if (!result.success) {
-        if (verbose) {
-          console.error(`Bun.build failed for agent: ${fullPath}`)
-        }
-        return null
-      }
-
-      const entryOutput =
-        result.outputs.find((output) => output.kind === 'entry-point') ??
-        result.outputs[0]
-      const jsText = entryOutput ? await entryOutput.text() : null
-      if (!jsText) {
-        if (verbose) {
-          console.error(`Failed to transpile agent (no output): ${fullPath}`)
-        }
-        return null
-      }
-
-      await fs.promises.mkdir(tempDir, { recursive: true })
-      await fs.promises.writeFile(compiledPath, jsText, 'utf8')
-      return compiledPath
-    }
-
-    if (buildFn) {
-      try {
-        const result = await buildFn({
-          entryPoints: [fullPath],
-          absWorkingDir: process.cwd(), // Force esbuild to use current cwd for path resolution
-          bundle: true,
-          format: 'esm',
-          platform: 'node',
-          target: 'node18',
-          write: false,
-          logLevel: verbose ? 'info' : 'silent',
-          sourcemap: 'inline',
-          packages: 'external',
-          external: [
-            ...builtinModules,
-            ...builtinModules.map((mod) => `node:${mod}`),
-          ],
-        })
-
-        const jsOutput = result.outputFiles?.[0]
-        if (!jsOutput?.text) {
-          if (verbose) {
-            console.error(`Failed to transpile agent (no output): ${fullPath}`)
-          }
-          return null
-        }
-
-        await fs.promises.mkdir(tempDir, { recursive: true })
-        await fs.promises.writeFile(compiledPath, jsOutput.text, 'utf8')
-
-        return compiledPath
-      } catch (error) {
-        const bunResult = await buildWithBun()
-        if (bunResult) {
-          return bunResult
-        }
-        if (verbose) {
-          console.error(
-            `Error transpiling agent ${fullPath}:`,
-            error instanceof Error ? error.message : error,
-          )
-        }
-        return null
-      }
-    }
-
-    const bunResult = await buildWithBun()
-    if (bunResult) {
-      return bunResult
-    }
-
+  if (!canUseBunBuild) {
     if (verbose) {
-      console.error(
-        `Cannot transpile ${fullPath}: esbuild not available in compiled binary`,
-      )
-    }
-    return null
-
-  } catch (error) {
-    if (verbose) {
-      console.error(
-        `Error transpiling agent ${fullPath}:`,
-        error instanceof Error ? error.message : error,
-      )
+      console.error(`Cannot transpile ${fullPath}: Bun.build not available`)
     }
     return null
   }
+
+  const hash = createHash('sha1').update(fullPath).digest('hex')
+  // Store compiled agents inside the current project so node module resolution
+  // can find dependencies (e.g. lodash, zod/v4) via parent node_modules.
+  const tempDir = path.join(process.cwd(), '.codebuff', 'agents')
+  const compiledPath = path.join(tempDir, `${hash}.mjs`)
+
+  const result = await Bun.build({
+    entrypoints: [fullPath],
+    outdir: tempDir,
+    target: 'node',
+    format: 'esm',
+    sourcemap: 'inline',
+    splitting: false,
+    minify: false,
+    root: process.cwd(),
+    packages: 'external',
+    external: [
+      ...builtinModules,
+      ...builtinModules.map((mod) => `node:${mod}`),
+    ],
+    throw: false,
+  })
+
+  if (!result.success) {
+    if (verbose) {
+      console.error(`Bun.build failed for agent: ${fullPath}`)
+    }
+    return null
+  }
+
+  const entryOutput =
+    result.outputs.find((output) => output.kind === 'entry-point') ??
+    result.outputs[0]
+  const jsText = entryOutput ? await entryOutput.text() : null
+  if (!jsText) {
+    if (verbose) {
+      console.error(`Failed to transpile agent (no output): ${fullPath}`)
+    }
+    return null
+  }
+
+  await fs.promises.mkdir(tempDir, { recursive: true })
+  await fs.promises.writeFile(compiledPath, jsText, 'utf8')
+  return compiledPath
 }

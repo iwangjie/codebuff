@@ -1,4 +1,4 @@
-import { has, isEqual } from 'lodash'
+import { isEqual } from 'lodash'
 
 import { formatToolOutput } from './codebuff-client'
 import { shouldCollapseByDefault } from './constants'
@@ -121,68 +121,102 @@ export interface SpawnAgentResultContent {
 }
 
 /**
+ * Extracts text content from a Message object's content array.
+ * Handles assistant messages with TextPart content.
+ */
+const extractTextFromMessageContent = (content: unknown): string => {
+  if (!Array.isArray(content)) {
+    return ''
+  }
+  return content
+    .filter((part: any) => part?.type === 'text' && typeof part?.text === 'string')
+    .map((part: any) => part.text)
+    .join('')
+}
+
+/**
  * Extracts displayable content from a spawn_agents result value.
  * Handles various nested structures that can come back from agent spawns.
  */
 export const extractSpawnAgentResultContent = (
   resultValue: unknown,
 ): SpawnAgentResultContent => {
+  // Handle null/undefined
+  if (!resultValue) {
+    return { content: '', hasError: false }
+  }
+
+  // Handle direct string
   if (typeof resultValue === 'string') {
     return { content: resultValue, hasError: false }
   }
 
-  if (resultValue && typeof resultValue === 'object') {
-    const nestedValue = (resultValue as any).value
+  if (typeof resultValue !== 'object') {
+    return { content: '', hasError: false }
+  }
 
-    if (typeof nestedValue === 'string') {
-      return { content: nestedValue, hasError: false }
-    }
+  const obj = resultValue as Record<string, unknown>
 
-    if (nestedValue && typeof nestedValue === 'object') {
-      if (has(nestedValue, 'errorMessage') && (nestedValue as any).errorMessage) {
-        return {
-          content: String((nestedValue as any).errorMessage),
-          hasError: true,
+  // Handle empty object
+  if (Object.keys(obj).length === 0) {
+    return { content: '', hasError: false }
+  }
+
+  // Handle error messages (check both top-level and nested)
+  if (obj.errorMessage) {
+    return { content: String(obj.errorMessage), hasError: true }
+  }
+  if ((obj.value as any)?.errorMessage) {
+    return { content: String((obj.value as any).errorMessage), hasError: true }
+  }
+
+  // Handle lastMessage and allMessages output modes: { type: "lastMessage"|"allMessages", value: [Message array] }
+  // This is common for agents like researcher-web
+  if ((obj.type === 'lastMessage' || obj.type === 'allMessages') && Array.isArray(obj.value)) {
+    const messages = obj.value as Array<{ role?: string; content?: unknown }>
+    const textContent = messages
+      .filter((msg) => msg?.role === 'assistant')
+      .map((msg) => extractTextFromMessageContent(msg?.content))
+      .filter(Boolean)
+      .join('\n')
+    return { content: textContent, hasError: false }
+  }
+
+  // Handle structuredOutput mode: { type: "structuredOutput", value: any }
+  if (obj.type === 'structuredOutput') {
+    const value = obj.value
+    // Check for message field in structured output
+    if (value && typeof value === 'object') {
+      const valueObj = value as Record<string, unknown>
+      if (typeof valueObj.message === 'string') {
+        return { content: valueObj.message, hasError: false }
+      }
+      // Check for data.message pattern
+      if (valueObj.data && typeof valueObj.data === 'object') {
+        const dataObj = valueObj.data as Record<string, unknown>
+        if (typeof dataObj.message === 'string') {
+          return { content: dataObj.message, hasError: false }
         }
       }
-
-      if (has(nestedValue, 'message') && (nestedValue as any).message) {
-        return { content: String((nestedValue as any).message), hasError: false }
-      }
     }
-
-    if (
-      typeof resultValue === 'object' &&
-      Object.keys(resultValue as Record<string, unknown>).length === 0
-    ) {
-      return { content: '', hasError: false }
-    }
-
-    // Handle error messages from failed agent spawns
-    if (has(resultValue, 'errorMessage') && (resultValue as any).errorMessage) {
-      return {
-        content: String((resultValue as any).errorMessage),
-        hasError: true,
-      }
-    }
-
-    // Handle nested value structure like { type: "lastMessage", value: "..." }
-    if (
-      has(resultValue, 'value') &&
-      (resultValue as any).value &&
-      typeof (resultValue as any).value === 'string'
-    ) {
-      return { content: (resultValue as any).value, hasError: false }
-    }
-
-    // Handle message field
-    if (has(resultValue, 'message') && (resultValue as any).message) {
-      return { content: (resultValue as any).message, hasError: false }
+    // Fall through to format as JSON
+    return {
+      content: formatToolOutput([{ type: 'json', value: obj.value }]),
+      hasError: false,
     }
   }
 
-  if (!resultValue) {
-    return { content: '', hasError: false }
+  // Handle nested string value: { value: "..." }
+  if (typeof obj.value === 'string') {
+    return { content: obj.value, hasError: false }
+  }
+
+  // Handle message field (top-level or nested)
+  if (obj.message) {
+    return { content: String(obj.message), hasError: false }
+  }
+  if ((obj.value as any)?.message) {
+    return { content: String((obj.value as any).message), hasError: false }
   }
 
   // Fallback to formatted output
@@ -224,6 +258,10 @@ export interface CreateAgentBlockOptions {
   agentType: string
   prompt?: string
   params?: Record<string, unknown>
+  /** The spawn_agents tool call ID that created this block */
+  spawnToolCallId?: string
+  /** The index within the spawn_agents call */
+  spawnIndex?: number
 }
 
 /**
@@ -232,7 +270,7 @@ export interface CreateAgentBlockOptions {
 export const createAgentBlock = (
   options: CreateAgentBlockOptions,
 ): AgentContentBlock => {
-  const { agentId, agentType, prompt, params } = options
+  const { agentId, agentType, prompt, params, spawnToolCallId, spawnIndex } = options
   return {
     type: 'agent',
     agentId,
@@ -243,6 +281,8 @@ export const createAgentBlock = (
     blocks: [] as ContentBlock[],
     initialPrompt: prompt || '',
     ...(params && { params }),
+    ...(spawnToolCallId && { spawnToolCallId }),
+    ...(spawnIndex !== undefined && { spawnIndex }),
     ...(shouldCollapseByDefault(agentType || '') && { isCollapsed: true }),
   }
 }

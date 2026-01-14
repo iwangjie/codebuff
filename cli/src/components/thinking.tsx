@@ -25,12 +25,14 @@ export const Thinking = memo(
     const theme = useTheme()
     const { contentMaxWidth } = useTerminalDimensions()
 
-    const width = Math.max(10, Math.min(availableWidth ?? contentMaxWidth, 120))
+    const width = Math.max(10, availableWidth ?? contentMaxWidth)
     // Normalize content to single line for consistent preview
     const normalizedContent = content.replace(/\n+/g, ' ').trim()
+    // Account for "..." prefix (3 chars) when calculating line widths
+    const effectiveWidth = width - 3
     const { lines, hasMore } = getLastNVisualLines(
       normalizedContent,
-      width,
+      effectiveWidth,
       PREVIEW_LINE_COUNT,
     )
 
@@ -44,70 +46,35 @@ export const Thinking = memo(
         }}
         onClick={onToggle}
       >
+        <text style={{ fg: theme.foreground }}>
+          <span>• </span>
+          <span attributes={TextAttributes.BOLD}>Thinking</span>
+        </text>
         {isCollapsed ? (
           lines.length > 0 && (
-            <box
-              style={{
-                flexDirection: 'row',
-                gap: 0,
-                alignItems: 'stretch',
-                marginTop: 0,
-              }}
-            >
-              <box
-                style={{
-                  width: 1,
-                  backgroundColor: theme.muted,
-                  marginTop: 0,
-                  marginBottom: 0,
-                }}
-              />
-              <box
-                style={{
-                  paddingLeft: 1,
-                  flexGrow: 1,
-                }}
-              >
-                <text
-                  style={{
-                    wrapMode: 'word',
-                    fg: theme.muted,
-                  }}
-                  attributes={TextAttributes.ITALIC}
-                >
-                  {hasMore ? '...' + lines.join(' ') : lines.join(' ')}
-                </text>
-              </box>
-            </box>
-          )
-        ) : (
-          <box
-            style={{
-              flexDirection: 'row',
-              gap: 0,
-              alignItems: 'stretch',
-              marginTop: 0,
-            }}
-          >
-            <box
-              style={{
-                width: 1,
-                backgroundColor: theme.muted,
-                marginTop: 0,
-                marginBottom: 0,
-              }}
-            />
-            <box style={{ paddingLeft: 1, flexGrow: 1 }}>
+            <box style={{ paddingLeft: 2 }}>
               <text
                 style={{
-                  wrapMode: 'word',
+                  wrapMode: 'none',
                   fg: theme.muted,
                 }}
                 attributes={TextAttributes.ITALIC}
               >
-                {content}
+                {hasMore ? '...' + lines.join('\n') : lines.join('\n')}
               </text>
             </box>
+          )
+        ) : (
+          <box style={{ paddingLeft: 2 }}>
+            <text
+              style={{
+                wrapMode: 'word',
+                fg: theme.muted,
+              }}
+              attributes={TextAttributes.ITALIC}
+            >
+              {content}
+            </text>
           </box>
         )}
       </Button>

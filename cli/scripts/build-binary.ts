@@ -129,11 +129,17 @@ async function main() {
 
   // Generate bundled agents file before compiling
   log('Generating bundled agents...')
-  runCommand('bun', ['run', 'scripts/prebuild-agents.ts'], { cwd: cliRoot, env: process.env })
+  runCommand('bun', ['run', 'scripts/prebuild-agents.ts'], {
+    cwd: cliRoot,
+    env: process.env,
+  })
 
   // Ensure SDK assets exist before compiling the CLI
   log('Building SDK dependencies...')
-  runCommand('bun', ['run', 'build:sdk'], { cwd: cliRoot, env: process.env })
+  runCommand('bun', ['run', '--cwd', '../sdk', 'build'], {
+    cwd: cliRoot,
+    env: process.env,
+  })
 
   patchOpenTuiAssetPaths()
   await ensureOpenTuiNativeBundle(targetInfo)
@@ -162,6 +168,7 @@ async function main() {
     'build',
     'src/index.tsx',
     '--compile',
+    '--production', // Required so compiled binaries use the production JSX runtime (avoids jsxDEV crashes).
     `--target=${targetInfo.bunTarget}`,
     `--outfile=${outputFile}`,
     '--sourcemap=none',

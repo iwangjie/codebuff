@@ -40,7 +40,30 @@ Dynamic imports make code harder to analyze, break tree-shaking, and can hide ci
 
 Use tmux to test CLI behavior in a controlled, scriptable way. This is especially useful for testing UI updates, authentication flows, and time-dependent behavior.
 
-### Basic Pattern
+### Recommended: Use Helper Scripts
+
+**Use the helper scripts in `scripts/tmux/`** for reliable CLI testing:
+
+```bash
+# Start a test session
+SESSION=$(./scripts/tmux/tmux-cli.sh start)
+
+# Send commands and capture output
+./scripts/tmux/tmux-cli.sh send "$SESSION" "/help"
+./scripts/tmux/tmux-cli.sh capture "$SESSION" --wait 2 --label "after-help"
+
+# View session data
+bun scripts/tmux/tmux-viewer/index.tsx "$SESSION" --json
+
+# Clean up
+./scripts/tmux/tmux-cli.sh stop "$SESSION"
+```
+
+Session logs are saved to `debug/tmux-sessions/{session}/` in YAML format for easy debugging.
+
+See `scripts/tmux/README.md` for full documentation or `cli/tmux.knowledge.md` for low-level details.
+
+### Manual Pattern (Legacy)
 
 ```bash
 tmux new-session -d -s test-session 'cd /path/to/codebuff && bun --cwd=cli run dev 2>&1' && \
@@ -99,6 +122,38 @@ tmux new-session -d -s test-session 'cd /path/to/codebuff && bun --cwd=cli run d
 - Paste functionality still works through the terminal's native paste mechanism, but we can no longer intercept paste events separately from typing.
 - If custom paste handling is needed in the future, it must be reimplemented using `useKeyboard` hook or by checking the official OpenTUI for updates.
 
+## OpenTUI Flex Layouts
+
+### Multi-Column / Masonry Layouts
+
+For columns that share space equally within a container, use the **flex trio pattern**:
+
+```tsx
+<box style={{ flexDirection: 'row', width: '100%' }}>
+  {columns.map((col, idx) => (
+    <box
+      key={idx}
+      style={{
+        flexDirection: 'column',
+        flexGrow: 1,      // Take equal share of space
+        flexShrink: 1,    // Allow shrinking
+        flexBasis: 0,     // Start from 0 and grow (not from content size)
+        minWidth: 0,      // Critical! Allows shrinking below content width
+      }}
+    >
+      {/* Column content */}
+    </box>
+  ))}
+</box>
+```
+
+**Why not explicit width?** Using `width: someNumber` for columns causes OpenTUI to overflow beyond container boundaries. The flex trio pattern respects the parent container's width constraints.
+
+**Key points:**
+- `minWidth: 0` is essential - without it, content won't shrink below its natural width
+- Use `width: '100%'` (string) for parent containers, not numeric values
+- `alignItems: 'flex-start'` prevents children from stretching to fill row height
+
 ## OpenTUI Text Rendering Constraints
 
 **CRITICAL**: OpenTUI has strict requirements for text rendering that must be followed:
@@ -118,6 +173,69 @@ tmux new-session -d -s test-session 'cd /path/to/codebuff && bun --cwd=cli run d
 ```
 
 OpenTUI expects plain text content or the `content` prop - it does not handle JSX expressions within text elements.
+
+## Interactive Clickable Elements and Text Selection
+
+When building interactive UI in the CLI, text inside clickable areas should **not** be selectable. Otherwise users accidentally highlight text when clicking buttons, which creates a poor UX.
+
+### Components
+
+**`Button`** (`cli/src/components/button.tsx`) - Primary choice for clickable controls:
+- Automatically makes all nested `<text>`/`<span>` children non-selectable
+- Implements safe click detection via mouseDown/mouseUp tracking (prevents accidental clicks from hover events)
+- Use for standard button-like interactions
+
+**`Clickable`** (`cli/src/components/clickable.tsx`) - For custom interactive regions:
+- Also makes all nested text non-selectable
+- Gives you direct control over mouse events (`onMouseDown`, `onMouseUp`, `onMouseOver`, `onMouseOut`)
+- Use when you need more control than `Button` provides
+
+**`makeTextUnselectable()`** - Exported utility for edge cases:
+- Recursively processes React children to add `selectable={false}` to all `<text>` and `<span>` elements
+- Use when building custom interactive components that can't use `Button` or `Clickable`
+
+### Usage Examples
+
+```tsx
+// ✅ CORRECT: Use Button for clickable controls
+import { Button } from './button'
+
+<Button onClick={handleClick}>
+  <text>Click me</text>
+</Button>
+
+// ✅ CORRECT: Use Clickable for custom mouse handling
+import { Clickable } from './clickable'
+
+<Clickable
+  onMouseDown={handleMouseDown}
+  onMouseOver={() => setHovered(true)}
+  onMouseOut={() => setHovered(false)}
+>
+  <text>Hover or click me</text>
+</Clickable>
+
+// ❌ WRONG: Raw <box> with mouse handlers (text will be selectable!)
+<box onMouseDown={handleClick}>
+  <text>Click me</text>  {/* Text can be accidentally selected */}
+</box>
+```
+
+### When to Use Which
+
+| Scenario | Use |
+|----------|-----|
+| Standard button | `Button` |
+| Link-like clickable text | `Button` |
+| Custom hover/click behavior | `Clickable` |
+| Building a new interactive primitive | `makeTextUnselectable()` |
+
+### Why This Matters
+
+These patterns:
+1. **Prevent accidental text selection** during clicks
+2. **Provide consistent behavior** across all interactive elements
+3. **Give future contributors clear building blocks** - no need to remember to add `selectable={false}` manually
 
 ## Screen Mode and TODO List Positioning
 

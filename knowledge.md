@@ -22,6 +22,7 @@ Codebuff is a tool for editing codebases via natural-language instructions to Bu
 - `web/`: Next.js app + API routes (the “web API”)
 - `packages/agent-runtime/`: agent runtime + tool handling (server-side)
 - `common/`: shared types, tools, schemas, utilities
+- `agents/`: main agents shipped with codebuff
 - `.agents/`: local agent templates (prompt + programmatic agents)
 
 ## Request Flow
@@ -98,6 +99,10 @@ Prefer `ErrorOr<T>` return values (`success(...)`/`failure(...)` in `common/src/
 
 CLI hook testing note: React 19 + Bun + RTL `renderHook()` is unreliable; prefer integration tests via components for hook behavior.
 
+### CLI tmux Testing
+
+For testing CLI behavior via tmux, use the helper scripts in `scripts/tmux/`. These handle bracketed paste mode and session logging automatically. Session data is saved to `debug/tmux-sessions/` in YAML format and can be viewed with `bun scripts/tmux/tmux-viewer/index.tsx`. See `scripts/tmux/README.md` for details.
+
 ## Environment Variables
 
 Quick rules:
@@ -110,8 +115,11 @@ Env DI helpers:
 
 - Base contracts: `common/src/types/contracts/env.ts` (`BaseEnv`, `BaseCiEnv`, `ClientEnv`, `CiEnv`)
 - Helpers: `common/src/env-process.ts`, `common/src/env-ci.ts`
-- CLI: `cli/src/utils/env.ts` (`getCliEnv`, `createTestCliEnv`)
-- SDK: `sdk/src/env.ts` (`getSdkEnv`, `createTestSdkEnv`)
+- Test helpers: `common/src/testing-env-process.ts`, `common/src/testing-env-ci.ts`
+- CLI: `cli/src/utils/env.ts` (`getCliEnv`)
+- CLI test helpers: `cli/src/testing/env.ts` (`createTestCliEnv`)
+- SDK: `sdk/src/env.ts` (`getSdkEnv`)
+- SDK test helpers: `sdk/src/testing/env.ts` (`createTestSdkEnv`)
 
 Bun loads (highest precedence last):
 

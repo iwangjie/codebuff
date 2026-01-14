@@ -395,6 +395,7 @@ export const getPublicAgentState = (
     output,
     systemPrompt,
     toolDefinitions,
+    contextTokenCount,
   } = agentState
   return {
     agentId,
@@ -404,6 +405,7 @@ export const getPublicAgentState = (
     output,
     systemPrompt,
     toolDefinitions,
+    contextTokenCount,
   }
 }
 
@@ -553,7 +555,7 @@ async function executeSegmentsArray(
   segments: ParsedSegment[],
   params: ExecuteToolCallsArrayParams,
 ): Promise<ToolResultOutput[] | undefined> {
-  const { agentState } = params
+  const { agentState, onResponseChunk } = params
 
   let toolResults: ToolResultOutput[] = []
 
@@ -562,6 +564,9 @@ async function executeSegmentsArray(
       // Add text as an assistant message
       agentState.messageHistory = [...agentState.messageHistory]
       agentState.messageHistory.push(assistantMessage(segment.text))
+
+      // Stream assistant text
+      onResponseChunk(segment.text)
     } else {
       // Handle tool call segment
       const toolResult = await executeSingleToolCall(segment, params)

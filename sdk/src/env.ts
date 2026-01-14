@@ -5,11 +5,9 @@
  * process env with SDK-specific vars for binary paths and WASM.
  */
 
-import {
-  getBaseEnv,
-  createTestBaseEnv,
-} from '@codebuff/common/env-process'
+import { getBaseEnv } from '@codebuff/common/env-process'
 import { BYOK_OPENROUTER_ENV_VAR } from '@codebuff/common/constants/byok'
+import { CLAUDE_OAUTH_TOKEN_ENV_VAR } from '@codebuff/common/constants/claude-oauth'
 import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
 
 import type { SdkEnv } from './types/env'
@@ -32,25 +30,6 @@ export const getSdkEnv = (): SdkEnv => ({
   OVERRIDE_ARCH: process.env.OVERRIDE_ARCH,
 })
 
-/**
- * Create a test SdkEnv with optional overrides.
- * Composes from createTestBaseEnv() for DRY.
- */
-export const createTestSdkEnv = (
-  overrides: Partial<SdkEnv> = {},
-): SdkEnv => ({
-  ...createTestBaseEnv(),
-
-  // SDK-specific defaults
-  CODEBUFF_RG_PATH: undefined,
-  CODEBUFF_WASM_DIR: undefined,
-  VERBOSE: undefined,
-  OVERRIDE_TARGET: undefined,
-  OVERRIDE_PLATFORM: undefined,
-  OVERRIDE_ARCH: undefined,
-  ...overrides,
-})
-
 export const getCodebuffApiKeyFromEnv = (): string | undefined => {
   return process.env[API_KEY_ENV_VAR]
 }
@@ -61,4 +40,12 @@ export const getSystemProcessEnv = (): NodeJS.ProcessEnv => {
 
 export const getByokOpenrouterApiKeyFromEnv = (): string | undefined => {
   return process.env[BYOK_OPENROUTER_ENV_VAR]
+}
+
+/**
+ * Get Claude OAuth token from environment variable.
+ * This allows users to provide their Claude Pro/Max OAuth token for direct Anthropic API access.
+ */
+export const getClaudeOAuthTokenFromEnv = (): string | undefined => {
+  return process.env[CLAUDE_OAUTH_TOKEN_ENV_VAR]
 }

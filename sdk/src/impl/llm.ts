@@ -1,23 +1,9 @@
-import path from 'path'
-
-import {
-  checkLiveUserInput,
-  getLiveUserInputIds,
-} from '@codebuff/agent-runtime/live-user-inputs'
-import { getByokOpenrouterApiKeyFromEnv } from '../env'
-import {
-  BYOK_OPENROUTER_HEADER,
-} from '@codebuff/common/constants/byok'
 import { models, PROFIT_MARGIN } from '@codebuff/common/old-constants'
 import { buildArray } from '@codebuff/common/util/array'
 import { getErrorObject } from '@codebuff/common/util/error'
 import { convertCbToModelMessages } from '@codebuff/common/util/messages'
 import { isExplicitlyDefinedModel } from '@codebuff/common/util/model-utils'
 import { StopSequenceHandler } from '@codebuff/common/util/stop-sequence'
-import {
-  OpenAICompatibleChatLanguageModel,
-  VERSION,
-} from '@codebuff/internal/openai-compatible/index'
 import {
   streamText,
   generateText,
@@ -29,8 +15,11 @@ import {
   TypeValidationError,
 } from 'ai'
 
-import { WEBSITE_URL } from '../constants'
-import type { LanguageModelV2 } from '@ai-sdk/provider'
+import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import { getModelForRequest, markClaudeOAuthRateLimited, fetchClaudeOAuthResetTime } from './model-provider'
+import { getValidClaudeOAuthCredentials } from '../credentials'
+
+import type { ModelRequestParams } from './model-provider'
 import type { OpenRouterProviderRoutingOptions } from '@codebuff/common/types/agent-template'
 import type {
   PromptAiSdkFn,
@@ -42,14 +31,6 @@ import type { ParamsOf } from '@codebuff/common/types/function-params'
 import type { JSONObject } from '@codebuff/common/types/json'
 import type { OpenRouterProviderOptions } from '@codebuff/internal/openrouter-ai-sdk'
 import type z from 'zod/v4'
-
-// Forked from https://github.com/OpenRouterTeam/ai-sdk-provider/
-type OpenRouterUsageAccounting = {
-  cost: number | null
-  costDetails: {
-    upstreamInferenceCost: number | null
-  }
-}
 
 // Provider routing documentation: https://openrouter.ai/docs/features/provider-routing
 const providerOrder = {
@@ -115,110 +96,141 @@ function getProviderOptions(params: {
         client_id: clientSessionId,
         ...(n && { n }),
       },
-      transforms: ['middle-out'],
       provider: providerConfig,
     },
   }
 }
 
-function getAiSdkModel(params: {
-  apiKey: string
-  model: string
-}): LanguageModelV2 {
-  const { apiKey, model } = params
+// Usage accounting type for OpenRouter/Codebuff backend responses
+// Forked from https://github.com/OpenRouterTeam/ai-sdk-provider/
+type OpenRouterUsageAccounting = {
+  cost: number | null
+  costDetails: {
+    upstreamInferenceCost: number | null
+  }
+}
 
-  const openrouterUsage: OpenRouterUsageAccounting = {
-    cost: null,
-    costDetails: {
-      upstreamInferenceCost: null,
-    },
+/**
+ * Check if an error is a Claude OAuth rate limit error that should trigger fallback.
+ */
+function isClaudeOAuthRateLimitError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+
+  // Check for APICallError from AI SDK
+  const err = error as {
+    statusCode?: number
+    message?: string
+    responseBody?: string
   }
 
-  const openrouterApiKey = getByokOpenrouterApiKeyFromEnv()
-  const codebuffBackendModel = new OpenAICompatibleChatLanguageModel(model, {
-    provider: 'codebuff',
-    url: ({ path: endpoint }) =>
-      new URL(path.join('/api/v1', endpoint), WEBSITE_URL).toString(),
-    headers: () => ({
-      Authorization: `Bearer ${apiKey}`,
-      'user-agent': `ai-sdk/openai-compatible/${VERSION}/codebuff`,
-      ...(openrouterApiKey && { [BYOK_OPENROUTER_HEADER]: openrouterApiKey }),
-    }),
-    metadataExtractor: {
-      extractMetadata: async ({ parsedBody }: { parsedBody: any }) => {
-        if (openrouterApiKey !== undefined) {
-          return { codebuff: { usage: openrouterUsage } }
-        }
+  // Check status code
+  if (err.statusCode === 429) return true
 
-        if (typeof parsedBody?.usage?.cost === 'number') {
-          openrouterUsage.cost = parsedBody.usage.cost
-        }
-        if (
-          typeof parsedBody?.usage?.cost_details?.upstream_inference_cost ===
-          'number'
-        ) {
-          openrouterUsage.costDetails.upstreamInferenceCost =
-            parsedBody.usage.cost_details.upstream_inference_cost
-        }
-        return { codebuff: { usage: openrouterUsage } }
-      },
-      createStreamExtractor: () => ({
-        processChunk: (parsedChunk: any) => {
-          if (openrouterApiKey !== undefined) {
-            return
-          }
+  // Check error message for rate limit indicators
+  const message = (err.message || '').toLowerCase()
+  const responseBody = (err.responseBody || '').toLowerCase()
 
-          if (typeof parsedChunk?.usage?.cost === 'number') {
-            openrouterUsage.cost = parsedChunk.usage.cost
-          }
-          if (
-            typeof parsedChunk?.usage?.cost_details?.upstream_inference_cost ===
-            'number'
-          ) {
-            openrouterUsage.costDetails.upstreamInferenceCost =
-              parsedChunk.usage.cost_details.upstream_inference_cost
-          }
-        },
-        buildMetadata: () => {
-          return { codebuff: { usage: openrouterUsage } }
-        },
-      }),
-    },
-    fetch: undefined,
-    includeUsage: undefined,
-    supportsStructuredOutputs: true,
-  })
-  return codebuffBackendModel
+  if (message.includes('rate_limit') || message.includes('rate limit'))
+    return true
+  if (message.includes('overloaded')) return true
+  if (
+    responseBody.includes('rate_limit') ||
+    responseBody.includes('overloaded')
+  )
+    return true
+
+  return false
+}
+
+/**
+ * Check if an error is a Claude OAuth authentication error (expired/invalid token).
+ * This indicates we should try refreshing the token.
+ */
+function isClaudeOAuthAuthError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+
+  const err = error as {
+    statusCode?: number
+    message?: string
+    responseBody?: string
+  }
+
+  // 401 Unauthorized or 403 Forbidden typically indicate auth issues
+  if (err.statusCode === 401 || err.statusCode === 403) return true
+
+  const message = (err.message || '').toLowerCase()
+  const responseBody = (err.responseBody || '').toLowerCase()
+
+  if (message.includes('unauthorized') || message.includes('invalid_token'))
+    return true
+  if (message.includes('authentication') || message.includes('expired'))
+    return true
+  if (
+    responseBody.includes('unauthorized') ||
+    responseBody.includes('invalid_token')
+  )
+    return true
+  if (
+    responseBody.includes('authentication') ||
+    responseBody.includes('expired')
+  )
+    return true
+
+  return false
 }
 
 export async function* promptAiSdkStream(
-  params: ParamsOf<PromptAiSdkStreamFn>,
+  params: ParamsOf<PromptAiSdkStreamFn> & {
+    skipClaudeOAuth?: boolean
+    onClaudeOAuthStatusChange?: (isActive: boolean) => void
+  },
 ): ReturnType<PromptAiSdkStreamFn> {
-  const { logger } = params
+  const { logger, trackEvent, userId, userInputId, model: requestedModel } = params
   const agentChunkMetadata =
     params.agentId != null ? { agentId: params.agentId } : undefined
 
-  if (
-    !checkLiveUserInput({ ...params, clientSessionId: params.clientSessionId })
-  ) {
+  if (params.signal.aborted) {
     logger.info(
       {
         userId: params.userId,
         userInputId: params.userInputId,
-        liveUserInputId: getLiveUserInputIds(params),
       },
       'Skipping stream due to canceled user input',
     )
     return null
   }
 
-  let aiSDKModel = getAiSdkModel(params)
+  const modelParams: ModelRequestParams = {
+    apiKey: params.apiKey,
+    model: params.model,
+    skipClaudeOAuth: params.skipClaudeOAuth,
+  }
+  const { model: aiSDKModel, isClaudeOAuth } = await getModelForRequest(modelParams)
+
+  // Track and notify about Claude OAuth usage
+  if (isClaudeOAuth) {
+    trackEvent({
+      event: AnalyticsEvent.CLAUDE_OAUTH_REQUEST,
+      userId: userId ?? '',
+      properties: {
+        model: requestedModel,
+        userInputId,
+      },
+      logger,
+    })
+    if (params.onClaudeOAuthStatusChange) {
+      params.onClaudeOAuthStatusChange(true)
+    }
+  }
 
   const response = streamText({
     ...params,
     prompt: undefined,
     model: aiSDKModel,
     messages: convertCbToModelMessages(params),
+    // When using Claude OAuth, disable retries so we can immediately fall back to Codebuff
+    // backend on rate limit errors instead of retrying 4 times first
+    ...(isClaudeOAuth && { maxRetries: 0 }),
     providerOptions: getProviderOptions({
       ...params,
       agentProviderOptions: params.agentProviderOptions,
@@ -339,10 +351,14 @@ export async function* promptAiSdkStream(
   let content = ''
   const stopSequenceHandler = new StopSequenceHandler(params.stopSequences)
 
+  // Track if we've yielded any content - if so, we can't safely fall back
+  let hasYieldedContent = false
+
   for await (const chunkValue of response.fullStream) {
     if (chunkValue.type !== 'text-delta') {
       const flushed = stopSequenceHandler.flush()
       if (flushed) {
+        hasYieldedContent = true
         content += flushed
         yield {
           type: 'text',
@@ -352,8 +368,8 @@ export async function* promptAiSdkStream(
       }
     }
     if (chunkValue.type === 'error') {
-      // Error chunks from fullStream are non-network errors (tool failures, model issues, etc.)
-      // Network errors are thrown, not yielded as chunks.
+      // Error chunks from fullStream are non-network errors (tool failures, model issues, rate limits, etc.)
+      // Network errors which cannot be recovered from are thrown, not yielded as chunks.
 
       const errorBody = APICallError.isInstance(chunkValue.error)
         ? chunkValue.error.responseBody
@@ -389,6 +405,77 @@ export async function* promptAiSdkStream(
         continue
       }
 
+      // Check if this is a Claude OAuth rate limit error - only fall back if no content yielded yet
+      if (
+        isClaudeOAuth &&
+        !params.skipClaudeOAuth &&
+        !hasYieldedContent &&
+        isClaudeOAuthRateLimitError(chunkValue.error)
+      ) {
+        logger.info(
+          { error: getErrorObject(chunkValue.error) },
+          'Claude OAuth rate limited during stream, falling back to Codebuff backend',
+        )
+        // Track the rate limit event
+        trackEvent({
+          event: AnalyticsEvent.CLAUDE_OAUTH_RATE_LIMITED,
+          userId: userId ?? '',
+          properties: {
+            model: requestedModel,
+            userInputId,
+          },
+          logger,
+        })
+        // Try to get the actual reset time from the quota API, fall back to default cooldown
+        const credentials = await getValidClaudeOAuthCredentials()
+        const resetTime = credentials?.accessToken 
+          ? await fetchClaudeOAuthResetTime(credentials.accessToken)
+          : null
+        // Mark as rate-limited so subsequent requests skip Claude OAuth
+        markClaudeOAuthRateLimited(resetTime ?? undefined)
+        if (params.onClaudeOAuthStatusChange) {
+          params.onClaudeOAuthStatusChange(false)
+        }
+        // Retry with Codebuff backend
+        const fallbackResult = yield* promptAiSdkStream({
+          ...params,
+          skipClaudeOAuth: true,
+        })
+        return fallbackResult
+      }
+
+      // Check if this is a Claude OAuth authentication error (expired token) - only fall back if no content yielded yet
+      if (
+        isClaudeOAuth &&
+        !params.skipClaudeOAuth &&
+        !hasYieldedContent &&
+        isClaudeOAuthAuthError(chunkValue.error)
+      ) {
+        logger.info(
+          { error: getErrorObject(chunkValue.error) },
+          'Claude OAuth auth error during stream, falling back to Codebuff backend',
+        )
+        // Track the auth error event
+        trackEvent({
+          event: AnalyticsEvent.CLAUDE_OAUTH_AUTH_ERROR,
+          userId: userId ?? '',
+          properties: {
+            model: requestedModel,
+            userInputId,
+          },
+          logger,
+        })
+        if (params.onClaudeOAuthStatusChange) {
+          params.onClaudeOAuthStatusChange(false)
+        }
+        // Retry with Codebuff backend (skipClaudeOAuth will bypass the failed OAuth)
+        const fallbackResult = yield* promptAiSdkStream({
+          ...params,
+          skipClaudeOAuth: true,
+        })
+        return fallbackResult
+      }
+
       logger.error(
         {
           chunk: { ...chunkValue, error: undefined },
@@ -422,6 +509,7 @@ export async function* promptAiSdkStream(
       if (!params.stopSequences) {
         content += chunkValue.text
         if (chunkValue.text) {
+          hasYieldedContent = true
           yield {
             type: 'text',
             text: chunkValue.text,
@@ -433,6 +521,7 @@ export async function* promptAiSdkStream(
 
       const stopSequenceResult = stopSequenceHandler.process(chunkValue.text)
       if (stopSequenceResult.text) {
+        hasYieldedContent = true
         content += stopSequenceResult.text
         yield {
           type: 'text',
@@ -455,27 +544,30 @@ export async function* promptAiSdkStream(
     }
   }
 
-  const providerMetadata = (await response.providerMetadata) ?? {}
-
-  let costOverrideDollars: number | undefined
-  if (providerMetadata.codebuff) {
-    if (providerMetadata.codebuff.usage) {
-      const openrouterUsage = providerMetadata.codebuff
-        .usage as OpenRouterUsageAccounting
-
-      costOverrideDollars =
-        (openrouterUsage.cost ?? 0) +
-        (openrouterUsage.costDetails?.upstreamInferenceCost ?? 0)
-    }
-  }
-
   const messageId = (await response.response).id
 
-  // Call the cost callback if provided
-  if (params.onCostCalculated && costOverrideDollars) {
-    await params.onCostCalculated(
-      calculateUsedCredits({ costDollars: costOverrideDollars }),
-    )
+  // Skip cost tracking for Claude OAuth (user is on their own subscription)
+  if (!isClaudeOAuth) {
+    const providerMetadata = (await response.providerMetadata) ?? {}
+
+    let costOverrideDollars: number | undefined
+    if (providerMetadata.codebuff) {
+      if (providerMetadata.codebuff.usage) {
+        const openrouterUsage = providerMetadata.codebuff
+          .usage as OpenRouterUsageAccounting
+
+        costOverrideDollars =
+          (openrouterUsage.cost ?? 0) +
+          (openrouterUsage.costDetails?.upstreamInferenceCost ?? 0)
+      }
+    }
+
+    // Call the cost callback if provided
+    if (params.onCostCalculated && costOverrideDollars) {
+      await params.onCostCalculated(
+        calculateUsedCredits({ costDollars: costOverrideDollars }),
+      )
+    }
   }
 
   return messageId
@@ -486,19 +578,23 @@ export async function promptAiSdk(
 ): ReturnType<PromptAiSdkFn> {
   const { logger } = params
 
-  if (!checkLiveUserInput(params)) {
+  if (params.signal.aborted) {
     logger.info(
       {
         userId: params.userId,
         userInputId: params.userInputId,
-        liveUserInputId: getLiveUserInputIds(params),
       },
       'Skipping prompt due to canceled user input',
     )
     return ''
   }
 
-  let aiSDKModel = getAiSdkModel(params)
+  const modelParams: ModelRequestParams = {
+    apiKey: params.apiKey,
+    model: params.model,
+    skipClaudeOAuth: true, // Always use Codebuff backend for non-streaming
+  }
+  const { model: aiSDKModel } = await getModelForRequest(modelParams)
 
   const response = await generateText({
     ...params,
@@ -540,18 +636,22 @@ export async function promptAiSdkStructured<T>(
 ): PromptAiSdkStructuredOutput<T> {
   const { logger } = params
 
-  if (!checkLiveUserInput(params)) {
+  if (params.signal.aborted) {
     logger.info(
       {
         userId: params.userId,
         userInputId: params.userInputId,
-        liveUserInputId: getLiveUserInputIds(params),
       },
       'Skipping structured prompt due to canceled user input',
     )
     return {} as T
   }
-  let aiSDKModel = getAiSdkModel(params)
+  const modelParams: ModelRequestParams = {
+    apiKey: params.apiKey,
+    model: params.model,
+    skipClaudeOAuth: true, // Always use Codebuff backend for non-streaming
+  }
+  const { model: aiSDKModel } = await getModelForRequest(modelParams)
 
   const response = await generateObject<z.ZodType<T>, 'object'>({
     ...params,

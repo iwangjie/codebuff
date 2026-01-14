@@ -4,7 +4,18 @@ import { getErrorObject } from '@codebuff/common/util/error'
 import z from 'zod/v4'
 
 import { WEBSITE_URL } from '../constants'
-import { AuthenticationError, ErrorCodes, NetworkError } from '../errors'
+import {
+  createAuthError,
+  createNetworkError,
+  createServerError,
+  createHttpError,
+  isRetryableStatusCode,
+} from '../error-utils'
+import {
+  MAX_RETRIES_PER_MESSAGE,
+  RETRY_BACKOFF_BASE_DELAY_MS,
+  RETRY_BACKOFF_MAX_DELAY_MS,
+} from '../retry-config'
 
 import type {
   AddAgentStepFn,
@@ -32,6 +43,58 @@ const agentsResponseSchema = z.object({
   data: DynamicAgentTemplateSchema,
 })
 
+/**
+ * Fetch with retry logic for transient errors (502, 503, etc.)
+ * Implements exponential backoff between retries.
+ */
+async function fetchWithRetry(
+  url: URL | string,
+  options: RequestInit,
+  logger?: { warn: (obj: object, msg: string) => void },
+): Promise<Response> {
+  let lastError: Error | null = null
+  let backoffDelay = RETRY_BACKOFF_BASE_DELAY_MS
+
+  for (let attempt = 0; attempt <= MAX_RETRIES_PER_MESSAGE; attempt++) {
+    try {
+      const response = await fetch(url, options)
+
+      // If response is OK or not retryable, return it
+      if (response.ok || !isRetryableStatusCode(response.status)) {
+        return response
+      }
+
+      // Retryable error - log and continue to retry
+      if (attempt < MAX_RETRIES_PER_MESSAGE) {
+        logger?.warn(
+          { status: response.status, attempt: attempt + 1, url: String(url) },
+          `Retryable HTTP error, retrying in ${backoffDelay}ms`,
+        )
+        await new Promise((resolve) => setTimeout(resolve, backoffDelay))
+        backoffDelay = Math.min(backoffDelay * 2, RETRY_BACKOFF_MAX_DELAY_MS)
+      } else {
+        // Last attempt, return the response even if it's an error
+        return response
+      }
+    } catch (error) {
+      // Network-level error (DNS, connection refused, etc.)
+      lastError = error instanceof Error ? error : new Error(String(error))
+
+      if (attempt < MAX_RETRIES_PER_MESSAGE) {
+        logger?.warn(
+          { error: getErrorObject(lastError), attempt: attempt + 1, url: String(url) },
+          `Network error, retrying in ${backoffDelay}ms`,
+        )
+        await new Promise((resolve) => setTimeout(resolve, backoffDelay))
+        backoffDelay = Math.min(backoffDelay * 2, RETRY_BACKOFF_MAX_DELAY_MS)
+      }
+    }
+  }
+
+  // All retries exhausted - throw the last error
+  throw lastError ?? new Error('Request failed after retries')
+}
+
 export async function getUserInfoFromApiKey<T extends UserColumn>(
   params: GetUserInfoFromApiKeyInput<T>,
 ): GetUserInfoFromApiKeyOutput<T> {
@@ -39,7 +102,7 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
 
   const cached = userInfoCache[apiKey]
   if (cached === null) {
-    throw new AuthenticationError('Authentication failed', 401)
+    throw createAuthError()
   }
   if (
     cached &&
@@ -65,19 +128,23 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
 
   let response: Response
   try {
-    response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
+    response = await fetchWithRetry(
+      url,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
       },
-    })
+      logger,
+    )
   } catch (error) {
     logger.error(
       { error: getErrorObject(error), apiKey, fields },
       'getUserInfoFromApiKey network error',
     )
     // Network-level failure: DNS, connection refused, timeout, etc.
-    throw new NetworkError('Network request failed', ErrorCodes.NETWORK_ERROR, undefined, error)
+    throw createNetworkError('Network request failed')
   }
 
   if (response.status === 401 || response.status === 403 || response.status === 404) {
@@ -89,7 +156,7 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
     delete userInfoCache[apiKey]
     // If the server returns 404 for invalid credentials, surface as 401 to callers
     const normalizedStatus = response.status === 404 ? 401 : response.status
-    throw new AuthenticationError('Authentication failed', normalizedStatus)
+    throw createHttpError('Authentication failed', normalizedStatus)
   }
 
   if (response.status >= 500 && response.status <= 599) {
@@ -97,11 +164,7 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
       { apiKey, fields, status: response.status },
       'getUserInfoFromApiKey server error',
     )
-    throw new NetworkError(
-      'Server error',
-      response.status === 503 ? ErrorCodes.SERVICE_UNAVAILABLE : ErrorCodes.SERVER_ERROR,
-      response.status,
-    )
+    throw createServerError('Server error', response.status)
   }
 
   if (!response.ok) {
@@ -109,7 +172,7 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
       { apiKey, fields, status: response.status },
       'getUserInfoFromApiKey request failed',
     )
-    throw new NetworkError('Request failed', ErrorCodes.UNKNOWN_ERROR, response.status)
+    throw createHttpError('Request failed', response.status)
   }
 
   const cachedBeforeMerge = userInfoCache[apiKey]
@@ -124,12 +187,12 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
       { error: getErrorObject(error), apiKey, fields },
       'getUserInfoFromApiKey JSON parse error',
     )
-    throw new NetworkError('Failed to parse response', ErrorCodes.UNKNOWN_ERROR, response.status, error)
+    throw createHttpError('Failed to parse response', response.status)
   }
 
   const userInfo = userInfoCache[apiKey]
   if (userInfo === null) {
-    throw new AuthenticationError('Authentication failed', 401)
+    throw createAuthError()
   }
   if (
     !userInfo ||
@@ -141,7 +204,7 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
       { apiKey, fields },
       'getUserInfoFromApiKey: response missing required fields',
     )
-    throw new NetworkError('Request failed', ErrorCodes.UNKNOWN_ERROR, response.status)
+    throw createHttpError('Request failed', response.status)
   }
   return Object.fromEntries(
     fields.map((field) => [field, userInfo[field]]),
@@ -160,12 +223,16 @@ export async function fetchAgentFromDatabase(
   )
 
   try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
       },
-    })
+      logger,
+    )
 
     if (!response.ok) {
       logger.error({ response }, 'fetchAgentFromDatabase request failed')
@@ -239,17 +306,21 @@ export async function startAgentRun(
   const url = new URL(`/api/v1/agent-runs`, WEBSITE_URL)
 
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          action: 'START',
+          agentId,
+          ancestorRunIds,
+        }),
       },
-      body: JSON.stringify({
-        action: 'START',
-        agentId,
-        ancestorRunIds,
-      }),
-    })
+      logger,
+    )
 
     if (!response.ok) {
       logger.error({ response }, 'startAgentRun request failed')
@@ -289,20 +360,24 @@ export async function finishAgentRun(
   const url = new URL(`/api/v1/agent-runs`, WEBSITE_URL)
 
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          action: 'FINISH',
+          runId,
+          status,
+          totalSteps,
+          directCredits,
+          totalCredits,
+        }),
       },
-      body: JSON.stringify({
-        action: 'FINISH',
-        runId,
-        status,
-        totalSteps,
-        directCredits,
-        totalCredits,
-      }),
-    })
+      logger,
+    )
 
     if (!response.ok) {
       logger.error({ response }, 'finishAgentRun request failed')
@@ -335,21 +410,25 @@ export async function addAgentStep(
   const url = new URL(`/api/v1/agent-runs/${agentRunId}/steps`, WEBSITE_URL)
 
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          stepNumber,
+          credits,
+          childRunIds,
+          messageId,
+          status,
+          errorMessage,
+          startTime,
+        }),
       },
-      body: JSON.stringify({
-        stepNumber,
-        credits,
-        childRunIds,
-        messageId,
-        status,
-        errorMessage,
-        startTime,
-      }),
-    })
+      logger,
+    )
 
     const responseBody = await response.json()
     if (!response.ok) {

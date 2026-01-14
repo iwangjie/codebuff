@@ -1,4 +1,7 @@
-import { TEST_AGENT_RUNTIME_IMPL } from '@codebuff/common/testing/impl/agent-runtime'
+import {
+  createTestAgentRuntimeParams,
+  testFileContext,
+} from '@codebuff/common/testing/fixtures/agent-runtime'
 import {
   getInitialAgentState,
   getInitialSessionState,
@@ -18,43 +21,14 @@ import * as agentRegistry from '../templates/agent-registry'
 import * as spawnAgentUtils from '../tools/handlers/tool/spawn-agent-utils'
 import { handleSpawnAgents } from '../tools/handlers/tool/spawn-agents'
 
-import type { ParamsExcluding } from '@codebuff/common/types/function-params'
 import type { AgentState } from '@codebuff/common/types/session-state'
-import type { ProjectFileContext } from '@codebuff/common/util/file'
 
-const mockFileContext: ProjectFileContext = {
-  projectRoot: '/test',
-  cwd: '/test',
-  fileTree: [],
-  fileTokenScores: {},
-  knowledgeFiles: {},
-  gitChanges: {
-    status: '',
-    diff: '',
-    diffCached: '',
-    lastCommitMessages: '',
-  },
-  changesSinceLastChat: {},
-  shellConfigFiles: {},
-  agentTemplates: {},
-  customToolDefinitions: {},
-  systemInfo: {
-    platform: 'test',
-    shell: 'test',
-    nodeVersion: 'test',
-    arch: 'test',
-    homedir: '/home/test',
-    cpus: 1,
-  },
-}
+const mockFileContext = testFileContext
 
 describe('Cost Aggregation System', () => {
   let mockAgentTemplate: any
   let mockLocalAgentTemplates: Record<string, any>
-  let params: ParamsExcluding<
-    typeof handleSpawnAgents,
-    'agentState' | 'toolCall'
-  >
+  let params: any
 
   beforeEach(() => {
     // Setup mock agent template
@@ -78,7 +52,7 @@ describe('Cost Aggregation System', () => {
     }
 
     params = {
-      ...TEST_AGENT_RUNTIME_IMPL,
+      ...createTestAgentRuntimeParams(),
       agentTemplate: mockAgentTemplate,
       ancestorRunIds: [],
       clientSessionId: 'test-session',
@@ -150,6 +124,7 @@ describe('Cost Aggregation System', () => {
         directCreditsUsed: 50,
         systemPrompt: 'Test system prompt',
         toolDefinitions: {},
+        contextTokenCount: 0,
       }
 
       // Mock executeAgent to return results with different credit costs
@@ -162,7 +137,10 @@ describe('Cost Aggregation System', () => {
             stepsRemaining: 10,
             creditsUsed: 75, // First subagent uses 75 credits
           },
-          output: { type: 'lastMessage', value: [assistantMessage('Sub-agent 1 response')] },
+          output: {
+            type: 'lastMessage',
+            value: [assistantMessage('Sub-agent 1 response')],
+          },
         })
         .mockResolvedValueOnce({
           agentState: {
@@ -172,7 +150,10 @@ describe('Cost Aggregation System', () => {
             stepsRemaining: 10,
             creditsUsed: 100, // Second subagent uses 100 credits
           },
-          output: { type: 'lastMessage', value: [assistantMessage('Sub-agent 2 response')] },
+          output: {
+            type: 'lastMessage',
+            value: [assistantMessage('Sub-agent 2 response')],
+          },
         })
 
       const mockToolCall = {
@@ -226,7 +207,10 @@ describe('Cost Aggregation System', () => {
             stepsRemaining: 10,
             creditsUsed: 50, // Successful agent
           },
-          output: { type: 'lastMessage', value: [assistantMessage('Successful response')] },
+          output: {
+            type: 'lastMessage',
+            value: [assistantMessage('Successful response')],
+          },
         })
         .mockRejectedValueOnce(
           (() => {
@@ -373,7 +357,10 @@ describe('Cost Aggregation System', () => {
             stepsRemaining: 10,
             creditsUsed: subAgent1Cost,
           } as AgentState,
-          output: { type: 'lastMessage', value: [assistantMessage('Sub-agent 1 response')] },
+          output: {
+            type: 'lastMessage',
+            value: [assistantMessage('Sub-agent 1 response')],
+          },
         })
         .mockResolvedValueOnce({
           agentState: {
@@ -384,7 +371,10 @@ describe('Cost Aggregation System', () => {
             stepsRemaining: 10,
             creditsUsed: subAgent2Cost,
           } as AgentState,
-          output: { type: 'lastMessage', value: [assistantMessage('Sub-agent 2 response')] },
+          output: {
+            type: 'lastMessage',
+            value: [assistantMessage('Sub-agent 2 response')],
+          },
         })
 
       const mockToolCall = {
