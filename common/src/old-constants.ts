@@ -299,17 +299,29 @@ const nonCacheableModels = [
   models.openrouter_grok_4,
 ] satisfies string[] as string[]
 export function supportsCacheControl(model: Model): boolean {
+  if (nonCacheableModels.includes(model)) {
+    return false
+  }
   if (model.startsWith('openai/')) {
     return true
   }
   if (model.startsWith('anthropic/')) {
     return true
   }
+
+  // Many OpenRouter model IDs are provider-prefixed (e.g. "google/...", "x-ai/...",
+  // "qwen/..."). We still want to send `cache_control` for these so OpenRouter (or
+  // an OpenRouter-compatible gateway) can perform prompt caching, even if the
+  // model isn't in our hardcoded list yet.
+  if (model.includes('/')) {
+    return true
+  }
+
   if (!isExplicitlyDefinedModel(model)) {
     // Default to no cache control for unknown models
     return false
   }
-  return !nonCacheableModels.includes(model)
+  return true
 }
 
 export const TEST_USER_ID = 'test-user-id'
