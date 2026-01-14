@@ -163,6 +163,20 @@ export function useAuthQuery(deps: UseAuthQueryDeps = {}) {
         8000, // Cap at 8 seconds
       )
     },
+    // If retries are exhausted, keep periodically re-attempting in the background
+    // so the CLI can recover without a restart when the network/service comes back.
+    refetchInterval: (query) => {
+      const error = query.state.error
+      const statusCode = getErrorStatusCode(error)
+      if (statusCode === undefined) return false
+      if (isAuthenticationError(error)) return false
+      if (!isRetryableStatusCode(statusCode)) return false
+
+      // Be gentler on rate limits.
+      if (statusCode === 429) return 60 * 1000
+      return 15 * 1000
+    },
+    refetchIntervalInBackground: true,
   })
 }
 

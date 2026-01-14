@@ -1,4 +1,3 @@
-import { isRetryableStatusCode, getErrorStatusCode } from '@codebuff/sdk'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -21,6 +20,7 @@ import { openFileAtPath } from './utils/open-file'
 import { formatCwd } from './utils/path-helpers'
 import { findGitRoot } from './utils/git'
 import { getLogoBlockColor, getLogoAccentColor } from './utils/theme-system'
+import { deriveAuthStatusFromAuthQuery } from './utils/derive-auth-status'
 
 import type { MultilineInputHandle } from './components/multiline-input'
 import type { AgentMode } from './utils/constants'
@@ -239,21 +239,9 @@ export const App = ({
     )
   }, [logoComponent, projectRoot, theme])
 
-  // Derive auth reachability + retrying state from authQuery error
-  const authError = authQuery.error
-  const authErrorStatusCode = authError ? getErrorStatusCode(authError) : undefined
-
-  let authStatus: AuthStatus = 'ok'
-  if (authQuery.isError && authErrorStatusCode !== undefined) {
-    if (isRetryableStatusCode(authErrorStatusCode)) {
-      // Retryable errors (408 timeout, 429 rate limit, 5xx server errors)
-      authStatus = 'retrying'
-    } else if (authErrorStatusCode >= 500) {
-      // Non-retryable server errors (unlikely but possible future codes)
-      authStatus = 'unreachable'
-    }
-    // 4xx client errors (401, 403, etc.) keep 'ok' - network is fine, just auth failed
-  }
+  // Derive auth reachability + retrying state from authQuery state.
+  // Only show "retrying" while a retry is actually in-flight.
+  const authStatus: AuthStatus = deriveAuthStatusFromAuthQuery(authQuery)
 
   // Render login modal when not authenticated AND auth service is reachable
   // Don't show login modal during network outages OR while retrying
