@@ -1,6 +1,7 @@
 import { createHash } from 'crypto'
 
 import { getCiEnv } from '@codebuff/common/env-ci'
+import { isByokMode } from '@codebuff/common/constants/byok'
 import {
   getUserInfoFromApiKey as defaultGetUserInfoFromApiKey,
   isRetryableStatusCode,
@@ -133,7 +134,9 @@ export function useAuthQuery(deps: UseAuthQueryDeps = {}) {
   } = deps
 
   const userCredentials = getUserCredentials()
-  const apiKey = userCredentials?.authToken || getCiEnv().CODEBUFF_API_KEY || ''
+  const apiKey = isByokMode()
+    ? ''
+    : userCredentials?.authToken || getCiEnv().CODEBUFF_API_KEY || ''
 
   return useQuery({
     queryKey: authQueryKeys.validation(apiKey),
