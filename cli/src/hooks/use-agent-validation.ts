@@ -1,3 +1,4 @@
+import { isByokMode } from '@codebuff/common/constants/byok'
 import { validateAgents } from '@codebuff/sdk'
 import { useCallback, useState } from 'react'
 
@@ -39,8 +40,9 @@ export const useAgentValidation = (): UseAgentValidationResult => {
     try {
       const agentDefinitions = loadAgentDefinitions()
 
+      // In BYOK mode, skip remote validation since we're not using Codebuff backend
       const validationResult = await validateAgents(agentDefinitions, {
-        remote: true,
+        remote: !isByokMode(),
       })
 
       if (validationResult.success) {

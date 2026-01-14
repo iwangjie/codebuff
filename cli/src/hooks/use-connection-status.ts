@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { isByokMode } from '@codebuff/common/constants/byok'
+
 import { getCodebuffClient } from '../utils/codebuff-client'
 import { logger } from '../utils/logger'
 
@@ -49,6 +51,12 @@ export const useConnectionStatus = (
   const previousConnectedRef = useRef<boolean | null>(null)
 
   useEffect(() => {
+    // In BYOK mode, skip connection checks - we don't need the Codebuff backend
+    if (isByokMode()) {
+      setIsConnected(true)
+      return
+    }
+
     let isMounted = true
     let timeoutId: NodeJS.Timeout | null = null
     let consecutiveSuccesses = 0

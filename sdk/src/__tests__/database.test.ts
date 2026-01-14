@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 
-import { getUserInfoFromApiKey } from '../impl/database'
+import { getUserInfoFromApiKey, startAgentRun } from '../impl/database'
 
 import type { Logger } from '@codebuff/common/types/contracts/logger'
 
@@ -96,5 +96,54 @@ describe('getUserInfoFromApiKey', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
+
+  test('returns null (no backend call) when apiKey is empty', async () => {
+    const fetchMock = mock(async () => {
+      throw new Error('fetch should not be called')
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const result = await getUserInfoFromApiKey({
+      apiKey: '',
+      fields: ['id'],
+      logger: createLoggerMocks(),
+    })
+
+    expect(result).toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(0)
+  })
 })
 
+describe('startAgentRun', () => {
+  const createLoggerMocks = (): Logger =>
+    ({
+      debug: mock(() => {}),
+      info: mock(() => {}),
+      warn: mock(() => {}),
+      error: mock(() => {}),
+    }) as unknown as Logger
+
+  test('returns a local runId when apiKey is empty', async () => {
+    const fetchMock = mock(async () => {
+      throw new Error('fetch should not be called')
+    })
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    try {
+      const runId = await startAgentRun({
+        apiKey: '',
+        agentId: 'base',
+        ancestorRunIds: [],
+        logger: createLoggerMocks(),
+      })
+
+      expect(typeof runId).toBe('string')
+      expect(runId).toContain('local-run-')
+      expect(fetchMock).toHaveBeenCalledTimes(0)
+    } finally {
+      globalThis.fetch = originalFetch
+      mock.restore()
+    }
+  })
+})

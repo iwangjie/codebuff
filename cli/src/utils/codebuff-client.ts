@@ -1,4 +1,5 @@
 import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
+import { isByokMode } from '@codebuff/common/constants/byok'
 import { AskUserBridge } from '@codebuff/common/utils/ask-user-bridge'
 import { CodebuffClient } from '@codebuff/sdk'
 
@@ -46,7 +47,10 @@ export function resetCodebuffClient(): void {
 
 export async function getCodebuffClient(): Promise<CodebuffClient | null> {
   if (!clientInstance) {
-    const { token: apiKey } = getAuthTokenDetails()
+    // In BYOK mode, use a placeholder API key since we bypass the Codebuff backend
+    const { token: apiKey } = isByokMode()
+      ? { token: 'byok-local-mode' }
+      : getAuthTokenDetails()
 
     if (!apiKey) {
       logger.warn(

@@ -459,16 +459,21 @@ async function runOnce({
   const promptId = Math.random().toString(36).substring(2, 15)
 
   // Send input
-  const userInfo = await getUserInfoFromApiKey({
-    ...agentRuntimeImpl,
-    apiKey,
-    fields: ['id'],
-  })
-  if (!userInfo) {
-    return getCancelledRunState('Invalid API key or user not found')
+  let userId: string | undefined
+  try {
+    const userInfo = await getUserInfoFromApiKey({
+      ...agentRuntimeImpl,
+      apiKey,
+      fields: ['id'],
+    })
+    userId = userInfo?.id
+  } catch (error) {
+    logger?.warn(
+      { error, statusCode: getErrorStatusCode(error) },
+      'Failed to fetch user info; continuing without userId',
+    )
+    userId = undefined
   }
-
-  const userId = userInfo.id
 
   signal?.addEventListener('abort', () => {
     resolve(getCancelledRunState())

@@ -43,6 +43,21 @@ const agentsResponseSchema = z.object({
   data: DynamicAgentTemplateSchema,
 })
 
+function shouldBypassBackend(apiKey: string): boolean {
+  if (typeof apiKey !== 'string') return true
+  const trimmed = apiKey.trim()
+  if (trimmed === '') return true
+  // CLI uses a placeholder key in BYOK mode. Treat it as unauthenticated/offline.
+  if (trimmed === 'byok-local-mode' || trimmed.startsWith('byok-')) return true
+  return false
+}
+
+function makeLocalId(prefix: string): string {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  if (uuid) return `${prefix}-${uuid}`
+  return `${prefix}-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`
+}
+
 /**
  * Fetch with retry logic for transient errors (502, 503, etc.)
  * Implements exponential backoff between retries.
@@ -99,6 +114,10 @@ export async function getUserInfoFromApiKey<T extends UserColumn>(
   params: GetUserInfoFromApiKeyInput<T>,
 ): GetUserInfoFromApiKeyOutput<T> {
   const { apiKey, fields, logger } = params
+
+  if (shouldBypassBackend(apiKey)) {
+    return null
+  }
 
   const cached = userInfoCache[apiKey]
   if (cached === null) {
@@ -217,6 +236,10 @@ export async function fetchAgentFromDatabase(
   const { apiKey, parsedAgentId, logger } = params
   const { publisherId, agentId, version } = parsedAgentId
 
+  if (shouldBypassBackend(apiKey)) {
+    return null
+  }
+
   const url = new URL(
     `/api/v1/agents/${publisherId}/${agentId}/${version ? version : 'latest'}`,
     WEBSITE_URL,
@@ -303,6 +326,10 @@ export async function startAgentRun(
 ): ReturnType<StartAgentRunFn> {
   const { apiKey, agentId, ancestorRunIds, logger } = params
 
+  if (shouldBypassBackend(apiKey)) {
+    return makeLocalId('local-run')
+  }
+
   const url = new URL(`/api/v1/agent-runs`, WEBSITE_URL)
 
   try {
@@ -357,6 +384,10 @@ export async function finishAgentRun(
     logger,
   } = params
 
+  if (shouldBypassBackend(apiKey)) {
+    return
+  }
+
   const url = new URL(`/api/v1/agent-runs`, WEBSITE_URL)
 
   try {
@@ -406,6 +437,10 @@ export async function addAgentStep(
     startTime,
     logger,
   } = params
+
+  if (shouldBypassBackend(apiKey)) {
+    return makeLocalId('local-step')
+  }
 
   const url = new URL(`/api/v1/agent-runs/${agentRunId}/steps`, WEBSITE_URL)
 

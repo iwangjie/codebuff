@@ -6,6 +6,7 @@ import os from 'os'
 import path from 'path'
 
 import { AnalyticsEvent } from '@codebuff/common/constants/analytics-events'
+import { isByokMode } from '@codebuff/common/constants/byok'
 import { getProjectFileTree } from '@codebuff/common/project-file-tree'
 import { createCliRenderer } from '@opentui/core'
 import { createRoot } from '@opentui/react'
@@ -250,6 +251,13 @@ async function main(): Promise<void> {
       React.useState(showProjectPicker)
 
     React.useEffect(() => {
+      // In BYOK mode, skip authentication entirely
+      if (isByokMode()) {
+        setRequireAuth(false)
+        setHasInvalidCredentials(false)
+        return
+      }
+
       const apiKey = getAuthTokenDetails().token ?? ''
 
       if (!apiKey) {
