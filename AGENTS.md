@@ -2,6 +2,9 @@
 
 **For LLMs**: This document provides a comprehensive reference for understanding and working with Codebuff's multi-agent architecture.
 
+## 启动 cli 测试
+export $(grep -v '^#' .env | xargs) && bun --cwd cli dev
+
 ## System Overview
 
 Codebuff is an open-source AI coding assistant that uses a **multi-agent orchestration system** to edit codebases through natural language. Instead of a single monolithic agent, it coordinates specialized agents that work together.

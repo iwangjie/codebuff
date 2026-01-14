@@ -23,7 +23,10 @@ import {
 
 import { WEBSITE_URL } from '../constants'
 import { getValidClaudeOAuthCredentials } from '../credentials'
-import { getByokOpenrouterApiKeyFromEnv } from '../env'
+import {
+  getByokOpenrouterApiKeyFromEnv,
+  getByokOpenrouterBaseUrlFromEnv,
+} from '../env'
 
 import type { LanguageModel } from 'ai'
 
@@ -307,6 +310,59 @@ function createCodebuffBackendModel(
   }
 
   const openrouterApiKey = getByokOpenrouterApiKeyFromEnv()
+  const openrouterBaseUrl = getByokOpenrouterBaseUrlFromEnv()
+
+  // If BYOK OpenRouter base URL is set, use direct OpenRouter connection.
+  if (openrouterBaseUrl && openrouterApiKey) {
+    const trimmedBaseUrl = openrouterBaseUrl.replace(/\/+$/, '')
+    const baseUrlWithV1 = trimmedBaseUrl.endsWith('/v1')
+      ? trimmedBaseUrl
+      : `${trimmedBaseUrl}/v1`
+
+    return new OpenAICompatibleChatLanguageModel(model, {
+      provider: 'openrouter',
+      url: ({ path: endpoint }) => `${baseUrlWithV1}${endpoint}`,
+      headers: () => ({
+        Authorization: `Bearer ${openrouterApiKey}`,
+        'user-agent': `ai-sdk/openai-compatible/${VERSION}/codebuff-byok`,
+      }),
+      metadataExtractor: {
+        extractMetadata: async ({ parsedBody }: { parsedBody: any }) => {
+          if (typeof parsedBody?.usage?.cost === 'number') {
+            openrouterUsage.cost = parsedBody.usage.cost
+          }
+          if (
+            typeof parsedBody?.usage?.cost_details?.upstream_inference_cost ===
+            'number'
+          ) {
+            openrouterUsage.costDetails.upstreamInferenceCost =
+              parsedBody.usage.cost_details.upstream_inference_cost
+          }
+          return { codebuff: { usage: openrouterUsage } }
+        },
+        createStreamExtractor: () => ({
+          processChunk: (parsedChunk: any) => {
+            if (typeof parsedChunk?.usage?.cost === 'number') {
+              openrouterUsage.cost = parsedChunk.usage.cost
+            }
+            if (
+              typeof parsedChunk?.usage?.cost_details
+                ?.upstream_inference_cost === 'number'
+            ) {
+              openrouterUsage.costDetails.upstreamInferenceCost =
+                parsedChunk.usage.cost_details.upstream_inference_cost
+            }
+          },
+          buildMetadata: () => {
+            return { codebuff: { usage: openrouterUsage } }
+          },
+        }),
+      },
+      fetch: undefined,
+      includeUsage: undefined,
+      supportsStructuredOutputs: true,
+    })
+  }
 
   return new OpenAICompatibleChatLanguageModel(model, {
     provider: 'codebuff',

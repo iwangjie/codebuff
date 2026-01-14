@@ -6,11 +6,15 @@
  */
 
 import { getBaseEnv } from '@codebuff/common/env-process'
-import { BYOK_OPENROUTER_ENV_VAR } from '@codebuff/common/constants/byok'
+import {
+  BYOK_OPENROUTER_ENV_VAR,
+  BYOK_OPENROUTER_BASE_URL_ENV_VAR,
+} from '@codebuff/common/constants/byok'
 import { CLAUDE_OAUTH_TOKEN_ENV_VAR } from '@codebuff/common/constants/claude-oauth'
 import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
 
 import type { SdkEnv } from './types/env'
+import { createTestBaseEnv } from '@codebuff/common/testing-env-process'
 
 /**
  * Get SDK environment values.
@@ -28,6 +32,25 @@ export const getSdkEnv = (): SdkEnv => ({
   OVERRIDE_TARGET: process.env.OVERRIDE_TARGET,
   OVERRIDE_PLATFORM: process.env.OVERRIDE_PLATFORM,
   OVERRIDE_ARCH: process.env.OVERRIDE_ARCH,
+})
+
+/**
+ * Create a test SdkEnv with optional overrides.
+ * Composes from createTestBaseEnv() for DRY.
+ */
+export const createTestSdkEnv = (
+  overrides: Partial<SdkEnv> = {},
+): SdkEnv => ({
+  ...createTestBaseEnv(),
+
+  // SDK-specific defaults
+  CODEBUFF_RG_PATH: undefined,
+  CODEBUFF_WASM_DIR: undefined,
+  VERBOSE: undefined,
+  OVERRIDE_TARGET: undefined,
+  OVERRIDE_PLATFORM: undefined,
+  OVERRIDE_ARCH: undefined,
+  ...overrides,
 })
 
 export const getCodebuffApiKeyFromEnv = (): string | undefined => {
@@ -48,4 +71,9 @@ export const getByokOpenrouterApiKeyFromEnv = (): string | undefined => {
  */
 export const getClaudeOAuthTokenFromEnv = (): string | undefined => {
   return process.env[CLAUDE_OAUTH_TOKEN_ENV_VAR]
+}
+
+
+export const getByokOpenrouterBaseUrlFromEnv = (): string | undefined => {
+  return process.env[BYOK_OPENROUTER_BASE_URL_ENV_VAR]
 }

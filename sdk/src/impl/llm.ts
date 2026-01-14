@@ -60,7 +60,7 @@ function getProviderOptions(params: {
   providerOptions?: Record<string, JSONObject>
   agentProviderOptions?: OpenRouterProviderRoutingOptions
   n?: number
-}): { codebuff: JSONObject } {
+}): Record<string, JSONObject> {
   const {
     model,
     runId,
@@ -91,6 +91,17 @@ function getProviderOptions(params: {
     codebuff: {
       ...providerOptions?.codebuff,
       // All values here get appended to the request body
+      codebuff_metadata: {
+        run_id: runId,
+        client_id: clientSessionId,
+        ...(n && { n }),
+      },
+      provider: providerConfig,
+    },
+    // When using a direct BYOK OpenRouter endpoint, the model provider is "openrouter",
+    // so we need the same extra body fields under that key too.
+    openrouter: {
+      ...providerOptions?.openrouter,
       codebuff_metadata: {
         run_id: runId,
         client_id: clientSessionId,
