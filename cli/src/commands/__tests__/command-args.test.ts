@@ -27,7 +27,6 @@ describe('command factory pattern', () => {
       inputValue: '/test',
       isChainInProgressRef: { current: false },
       isStreaming: false,
-      logoutMutation: {} as RouterParams['logoutMutation'],
       streamMessageIdRef: { current: null },
       addToQueue: mock(() => {}),
       clearMessages: mock(() => {}),
@@ -37,9 +36,7 @@ describe('command factory pattern', () => {
       setCanProcessQueue: mock(() => {}),
       setInputFocused: mock(() => {}),
       setInputValue: mock(() => {}),
-      setIsAuthenticated: mock(() => {}),
       setMessages: mock(() => {}),
-      setUser: mock(() => {}),
       stopStreaming: mock(() => {}),
       ...overrides,
     }) as RouterParams
@@ -160,12 +157,12 @@ describe('command factory pattern', () => {
       expect(withArgsCommands.length).toBeGreaterThan(0)
     })
 
-	    test('expected commands ignore args', () => {
-	      const expectedNoArgs = ['login', 'logout', 'exit', 'init', 'help']
-	      for (const name of expectedNoArgs) {
-	        const cmd = COMMAND_REGISTRY.find((c) => c.name === name)
-	        expect(cmd, `Command ${name} should exist`).toBeDefined()
-	        expect(cmd?.acceptsArgs, `Command ${name} should not accept args`).toBe(
+    test('expected commands ignore args', () => {
+      const expectedNoArgs = ['exit', 'init', 'help', 'history']
+      for (const name of expectedNoArgs) {
+        const cmd = COMMAND_REGISTRY.find((c) => c.name === name)
+        expect(cmd, `Command ${name} should exist`).toBeDefined()
+        expect(cmd?.acceptsArgs, `Command ${name} should not accept args`).toBe(
           false,
         )
       }
@@ -176,9 +173,7 @@ describe('command factory pattern', () => {
       const expectedWithArgs = [
         'feedback',
         'bash',
-        'referral',
         'image',
-        'publish',
         'new',
         'mode:default',
         'mode:max',

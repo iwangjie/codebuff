@@ -350,7 +350,7 @@ describe('activity-tracker integration scenarios', () => {
     })
   })
 
-  describe('Claude quota polling scenarios', () => {
+  describe('activity-aware polling scenarios', () => {
     test('idle user should not trigger quota polling', () => {
       const idleThreshold = 30000
 

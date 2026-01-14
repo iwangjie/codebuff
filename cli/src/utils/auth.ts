@@ -8,7 +8,6 @@ import { z } from 'zod'
 
 import type { CiEnv } from '@codebuff/common/types/contracts/env'
 
-import { getApiClient, setApiClientAuthToken } from './codebuff-api'
 import { logger } from './logger'
 
 // User schema
@@ -24,20 +23,9 @@ const userSchema = z.object({
 
 export type User = z.infer<typeof userSchema>
 
-// Claude OAuth credentials schema (for passthrough, not strict validation here)
-const claudeOAuthSchema = z
-  .object({
-    accessToken: z.string(),
-    refreshToken: z.string(),
-    expiresAt: z.number(),
-    connectedAt: z.number(),
-  })
-  .optional()
-
 const credentialsSchema = z
   .object({
     default: userSchema,
-    claudeOAuth: claudeOAuthSchema,
   })
   .catchall(z.unknown())
 
@@ -205,31 +193,6 @@ export const clearUserCredentials = (): void => {
 }
 
 export async function logoutUser(): Promise<boolean> {
-  try {
-    const user = getUserCredentials()
-    if (user?.authToken) {
-      setApiClientAuthToken(user.authToken)
-      const apiClient = getApiClient()
-      try {
-        const response = await apiClient.logout({
-          userId: user.id,
-          fingerprintId: user.fingerprintId,
-          fingerprintHash: user.fingerprintHash,
-        })
-        if (!response.ok) {
-          logger.error(
-            { status: response.status, error: response.error },
-            'Logout request failed',
-          )
-        }
-      } catch (err) {
-        logger.error(err, 'Logout request error')
-      }
-    }
-  } catch (error) {
-    logger.error(error, 'Unexpected error preparing logout')
-  }
-
   try {
     clearUserCredentials()
   } catch (error) {

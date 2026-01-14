@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react'
 
-import { LOGO, LOGO_SMALL, SHADOW_CHARS } from '../login/constants'
-import { parseLogoLines } from '../login/utils'
+import { LOGO, LOGO_SMALL, SHADOW_CHARS } from '../utils/logo-constants'
+import { parseLogoLines } from '../utils/logo-utils'
 
 interface UseLogoOptions {
   /**
@@ -78,7 +78,7 @@ export const useLogo = ({
       .join('\n')
   }, [rawLogoString, availableWidth])
 
-  // Format component for React contexts (login modal, etc.)
+  // Format component for React contexts (header, splash, etc.)
   const component = useMemo(() => {
     // Text-only variant for very narrow widths
     if (rawLogoString === 'CODEBUFF') {

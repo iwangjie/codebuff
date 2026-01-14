@@ -1,5 +1,4 @@
 import { RECONNECTION_MESSAGE_DURATION_MS } from '@codebuff/sdk'
-import { useQueryClient } from '@tanstack/react-query'
 import {
   useCallback,
   useEffect,
@@ -12,7 +11,6 @@ import { useShallow } from 'zustand/react/shallow'
 
 import { routeUserPrompt, addBashMessageToHistory } from './commands/router'
 import { ChatInputBar } from './components/chat-input-bar'
-import { BottomStatusLine } from './components/bottom-status-line'
 import { LoadPreviousButton } from './components/load-previous-button'
 import { MessageWithAgents } from './components/message-with-agents'
 import { PendingBashMessage } from './components/pending-bash-message'
@@ -21,9 +19,7 @@ import { TopBanner } from './components/top-banner'
 import { SLASH_COMMANDS } from './data/slash-commands'
 import { useAgentValidation } from './hooks/use-agent-validation'
 import { useAskUserBridge } from './hooks/use-ask-user-bridge'
-import { authQueryKeys } from './hooks/use-auth-query'
 import { useChatInput } from './hooks/use-chat-input'
-import { useClaudeQuotaQuery } from './hooks/use-claude-quota-query'
 import {
   useChatKeyboard,
   type ChatKeyboardHandlers,
@@ -35,7 +31,6 @@ import { useEvent } from './hooks/use-event'
 import { useExitHandler } from './hooks/use-exit-handler'
 import { useInputHistory } from './hooks/use-input-history'
 import { useMessageQueue, type QueuedMessage } from './hooks/use-message-queue'
-import { usePublishMutation } from './hooks/use-publish-mutation'
 import { useQueueControls } from './hooks/use-queue-controls'
 import { useQueueUi } from './hooks/use-queue-ui'
 import { useChatScrollbox } from './hooks/use-scroll-management'
@@ -45,12 +40,10 @@ import { useTerminalDimensions } from './hooks/use-terminal-dimensions'
 import { useTerminalLayout } from './hooks/use-terminal-layout'
 import { useTheme } from './hooks/use-theme'
 import { useTimeout } from './hooks/use-timeout'
-import { WEBSITE_URL } from './login/constants'
 import { getProjectRoot } from './project-files'
 import { useChatStore } from './state/chat-store'
 import { useChatHistoryStore } from './state/chat-history-store'
 import { useFeedbackStore } from './state/feedback-store'
-import { usePublishStore } from './state/publish-store'
 import {
   addClipboardPlaceholder,
   addPendingImageFromFile,
@@ -66,11 +59,7 @@ import {
 } from './utils/keyboard-actions'
 import { loadLocalAgents } from './utils/local-agent-registry'
 import { buildMessageTree } from './utils/message-tree-utils'
-import {
-  getStatusIndicatorState,
-  type AuthStatus,
-} from './utils/status-indicator-state'
-import { getClaudeOAuthStatus } from './utils/claude-oauth'
+import { getStatusIndicatorState } from './utils/status-indicator-state'
 import { createPasteHandler } from './utils/strings'
 import { computeInputLayoutMetrics } from './utils/text-layout'
 import { createMarkdownPalette } from './utils/theme-system'
@@ -79,11 +68,9 @@ import type { CommandResult } from './commands/command-registry'
 import type { MultilineInputHandle } from './components/multiline-input'
 import type { ContentBlock } from './types/chat'
 import type { SendMessageFn } from './types/contracts/send-message'
-import type { User } from './utils/auth'
 import type { AgentMode } from './utils/constants'
 import type { FileTreeNode } from '@codebuff/common/util/file'
 import type { ScrollBoxRenderable } from '@opentui/core'
-import type { UseMutationResult } from '@tanstack/react-query'
 import type { Dispatch, SetStateAction } from 'react'
 
 export const Chat = ({
@@ -92,12 +79,8 @@ export const Chat = ({
   agentId,
   fileTree,
   inputRef,
-  setIsAuthenticated,
-  setUser,
-  logoutMutation,
   continueChat,
   continueChatId,
-  authStatus,
   initialMode,
   gitRoot,
   onSwitchToGitRoot,
@@ -107,12 +90,8 @@ export const Chat = ({
   agentId?: string
   fileTree: FileTreeNode[]
   inputRef: React.MutableRefObject<MultilineInputHandle | null>
-  setIsAuthenticated: Dispatch<SetStateAction<boolean | null>>
-  setUser: Dispatch<SetStateAction<User | null>>
-  logoutMutation: UseMutationResult<boolean, Error, void, unknown>
   continueChat: boolean
   continueChatId?: string
-  authStatus: AuthStatus
   initialMode?: AgentMode
   gitRoot?: string | null
   onSwitchToGitRoot?: () => void
@@ -126,7 +105,6 @@ export const Chat = ({
   const [visibleMessageCount, setVisibleMessageCount] =
     useState(MESSAGE_BATCH_SIZE)
 
-  const queryClient = useQueryClient()
   const [, startUiTransition] = useTransition()
 
   const [showReconnectionMessage, setShowReconnectionMessage] = useState(false)
@@ -218,9 +196,6 @@ export const Chat = ({
 
   const handleReconnection = useCallback(
     (isInitialConnection: boolean) => {
-      // Invalidate auth queries so we refetch with current credentials
-      queryClient.invalidateQueries({ queryKey: authQueryKeys.all })
-
       startUiTransition(() => {
         if (!isInitialConnection) {
           setShowReconnectionMessage(true)
@@ -236,7 +211,7 @@ export const Chat = ({
         }
       })
     },
-    [queryClient, reconnectionTimeout, startUiTransition],
+    [reconnectionTimeout, startUiTransition],
   )
 
   const isConnected = useConnectionStatus(handleReconnection)
@@ -687,7 +662,6 @@ export const Chat = ({
           inputValue: content,
           isChainInProgressRef,
           isStreaming,
-          logoutMutation,
           streamMessageIdRef,
           addToQueue,
           clearMessages,
@@ -697,9 +671,7 @@ export const Chat = ({
           setCanProcessQueue,
           setInputFocused,
           setInputValue,
-          setIsAuthenticated,
           setMessages,
-          setUser,
           stopStreaming,
         })
 
@@ -753,7 +725,7 @@ export const Chat = ({
     }
   }, [onSubmitPrompt, agentMode])
 
-  // handleSlashItemClick is defined later after feedback/publish stores are available
+  // handleSlashItemClick is defined later after feedback stores are available
 
   const handleMentionItemClick = useCallback(
     (index: number) => {
@@ -820,18 +792,6 @@ export const Chat = ({
     })),
   )
 
-  const { publishMode, openPublishMode, closePublish, preSelectAgents } =
-    usePublishStore(
-      useShallow((state) => ({
-        publishMode: state.publishMode,
-        openPublishMode: state.openPublishMode,
-        closePublish: state.closePublish,
-        preSelectAgents: state.preSelectAgents,
-      })),
-    )
-
-  const publishMutation = usePublishMutation()
-
   const handleCommandResult = useCallback(
     (result?: CommandResult) => {
       if (!result) return
@@ -848,26 +808,11 @@ export const Chat = ({
         }
       }
 
-      if (result.openPublishMode) {
-        if (result.preSelectAgents && result.preSelectAgents.length > 0) {
-          // preSelectAgents already sets publishMode: true, so don't call openPublishMode
-          // which would reset the selectedAgentIds
-          preSelectAgents(result.preSelectAgents)
-        } else {
-          openPublishMode()
-        }
-      }
-
       if (result.openChatHistory) {
         useChatHistoryStore.getState().openChatHistory()
       }
     },
-    [
-      saveCurrentInput,
-      openFeedbackForMessage,
-      openPublishMode,
-      preSelectAgents,
-    ],
+    [saveCurrentInput, openFeedbackForMessage],
   )
 
   // Click handler for slash menu items - executes command immediately
@@ -945,18 +890,6 @@ export const Chat = ({
     closeFeedback()
     handleExitFeedback()
   }, [closeFeedback, handleExitFeedback])
-
-  const handleExitPublish = useCallback(() => {
-    closePublish()
-    setInputFocused(true)
-  }, [closePublish, setInputFocused])
-
-  const handlePublish = useCallback(
-    async (agentIds: string[]) => {
-      await publishMutation.mutateAsync(agentIds)
-    },
-    [publishMutation],
-  )
 
   // Ensure bracketed paste events target the active chat input
   useEffect(() => {
@@ -1329,20 +1262,11 @@ export const Chat = ({
     streamStatus,
     nextCtrlCWillExit,
     isConnected,
-    authStatus,
     showReconnectionMessage,
     isRetrying,
     isAskUserActive: askUserState !== null,
   })
   const hasStatusIndicatorContent = statusIndicatorState.kind !== 'idle'
-
-  const isClaudeOAuthActive = getClaudeOAuthStatus().connected
-
-  // Fetch Claude quota when OAuth is active
-  const { data: claudeQuota } = useClaudeQuotaQuery({
-    enabled: isClaudeOAuthActive,
-    refetchInterval: 60 * 1000, // Refetch every 60 seconds
-  })
 
   const inputBoxTitle = useMemo(() => {
     const segments: string[] = []
@@ -1363,9 +1287,6 @@ export const Chat = ({
   const shouldShowStatusLine =
     !feedbackMode &&
     (hasStatusIndicatorContent || shouldShowQueuePreview || !isAtBottom)
-
-  // Determine if Claude is actively streaming/waiting
-  const isClaudeActive = isStreaming || isWaitingForResponse
 
   return (
     <box
@@ -1501,9 +1422,6 @@ export const Chat = ({
           isNarrowWidth={isNarrowWidth}
           feedbackMode={feedbackMode}
           handleExitFeedback={handleExitFeedback}
-          publishMode={publishMode}
-          handleExitPublish={handleExitPublish}
-          handlePublish={handlePublish}
           handleSubmit={handleSubmit}
           onPaste={createPasteHandler({
             text: inputValue,
@@ -1513,12 +1431,6 @@ export const Chat = ({
             onPasteImagePath: chatKeyboardHandlers.onPasteImagePath,
             cwd: getProjectRoot() ?? process.cwd(),
           })}
-        />
-
-        <BottomStatusLine
-          isClaudeConnected={isClaudeOAuthActive}
-          isClaudeActive={isClaudeActive}
-          claudeQuota={claudeQuota}
         />
       </box>
     </box>

@@ -3,11 +3,8 @@ import { useShallow } from 'zustand/react/shallow'
 
 import { Chat } from './chat'
 import { ChatHistoryScreen } from './components/chat-history-screen'
-import { LoginModal } from './components/login-modal'
 import { ProjectPickerScreen } from './components/project-picker-screen'
 import { TerminalLink } from './components/terminal-link'
-import { useAuthQuery } from './hooks/use-auth-query'
-import { useAuthState } from './hooks/use-auth-state'
 import { useLogo } from './hooks/use-logo'
 import { useSheenAnimation } from './hooks/use-sheen-animation'
 import { useTerminalDimensions } from './hooks/use-terminal-dimensions'
@@ -20,18 +17,14 @@ import { openFileAtPath } from './utils/open-file'
 import { formatCwd } from './utils/path-helpers'
 import { findGitRoot } from './utils/git'
 import { getLogoBlockColor, getLogoAccentColor } from './utils/theme-system'
-import { deriveAuthStatusFromAuthQuery } from './utils/derive-auth-status'
 
 import type { MultilineInputHandle } from './components/multiline-input'
 import type { AgentMode } from './utils/constants'
-import type { AuthStatus } from './utils/status-indicator-state'
 import type { FileTreeNode } from '@codebuff/common/util/file'
 
 interface AppProps {
   initialPrompt: string | null
   agentId?: string
-  requireAuth: boolean | null
-  hasInvalidCredentials: boolean
   fileTree: FileTreeNode[]
   continueChat: boolean
   continueChatId?: string
@@ -43,8 +36,6 @@ interface AppProps {
 export const App = ({
   initialPrompt,
   agentId,
-  requireAuth,
-  hasInvalidCredentials,
   fileTree,
   continueChat,
   continueChatId,
@@ -104,22 +95,6 @@ export const App = ({
   useTerminalFocus({
     onFocusChange: setInputFocused,
     onSupportDetected: handleSupportDetected,
-  })
-
-  // Get auth query for network status tracking
-  const authQuery = useAuthQuery()
-
-  const {
-    isAuthenticated,
-    setIsAuthenticated,
-    setUser,
-    handleLoginSuccess,
-    logoutMutation,
-  } = useAuthState({
-    requireAuth,
-    inputRef,
-    setInputFocused,
-    resetChatStore,
   })
 
   const projectRoot = getProjectRoot()
@@ -239,25 +214,6 @@ export const App = ({
     )
   }, [logoComponent, projectRoot, theme])
 
-  // Derive auth reachability + retrying state from authQuery state.
-  // Only show "retrying" while a retry is actually in-flight.
-  const authStatus: AuthStatus = deriveAuthStatusFromAuthQuery(authQuery)
-
-  // Render login modal when not authenticated AND auth service is reachable
-  // Don't show login modal during network outages OR while retrying
-  if (
-    requireAuth !== null &&
-    isAuthenticated === false &&
-    authStatus === 'ok'
-  ) {
-    return (
-      <LoginModal
-        onLoginSuccess={handleLoginSuccess}
-        hasInvalidCredentials={hasInvalidCredentials}
-      />
-    )
-  }
-
   // Render project picker when at home directory or outside a project
   if (showProjectPicker) {
     return (
@@ -290,12 +246,8 @@ export const App = ({
       agentId={agentId}
       fileTree={fileTree}
       inputRef={inputRef}
-      setIsAuthenticated={setIsAuthenticated}
-      setUser={setUser}
-      logoutMutation={logoutMutation}
       continueChat={effectiveContinueChat}
       continueChatId={effectiveContinueChatId}
-      authStatus={authStatus}
       initialMode={initialMode}
       gitRoot={gitRoot}
       onSwitchToGitRoot={handleSwitchToGitRoot}

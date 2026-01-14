@@ -5,7 +5,6 @@ import { createRequire } from 'module'
 import os from 'os'
 import path from 'path'
 
-import { isByokMode } from '@codebuff/common/constants/byok'
 import { getProjectFileTree } from '@codebuff/common/project-file-tree'
 import { createCliRenderer } from '@opentui/core'
 import { createRoot } from '@opentui/react'
@@ -15,14 +14,11 @@ import {
   focusManager,
 } from '@tanstack/react-query'
 import { Command } from 'commander'
-import { cyan, green, red, yellow } from 'picocolors'
 import React from 'react'
 
 import { App } from './app'
-import { handlePublish } from './commands/publish'
 import { initializeApp } from './init/init-app'
 import { getProjectRoot, setProjectRoot } from './project-files'
-import { getAuthTokenDetails } from './utils/auth'
 import { resetCodebuffClient } from './utils/codebuff-client'
 import { getCliEnv } from './utils/env'
 import { initializeAgentRegistry } from './utils/local-agent-registry'
@@ -171,7 +167,6 @@ async function main(): Promise<void> {
     initialMode,
   } = parseArgs()
 
-  const isPublishCommand = process.argv.includes('publish')
   const hasAgentOverride = Boolean(agent && agent.trim().length > 0)
 
   await initializeApp({ cwd })
@@ -184,33 +179,8 @@ async function main(): Promise<void> {
 
   // Initialize agent registry (loads user agents via SDK).
   // When --agent is provided, skip local .agents to avoid overrides.
-  if (isPublishCommand || !hasAgentOverride) {
+  if (!hasAgentOverride) {
     await initializeAgentRegistry()
-  }
-
-  // Handle publish command before rendering the app
-  if (isPublishCommand) {
-    const publishIndex = process.argv.indexOf('publish')
-    const agentIds = process.argv.slice(publishIndex + 1)
-    const result = await handlePublish(agentIds)
-
-    if (result.success && result.publisherId && result.agents) {
-      logger.info(green('✅ Successfully published:'))
-      for (const agent of result.agents) {
-        logger.info(
-          cyan(
-            `  - ${agent.displayName} (${result.publisherId}/${agent.id}@${agent.version})`,
-          ),
-        )
-      }
-      process.exit(0)
-    } else {
-      logger.error(red('❌ Publish failed'))
-      if (result.error) logger.error(red(`Error: ${result.error}`))
-      if (result.details) logger.error(red(result.details))
-      if (result.hint) logger.warn(yellow(`Hint: ${result.hint}`))
-      process.exit(1)
-    }
   }
 
   if (clearLogs) {
@@ -219,35 +189,12 @@ async function main(): Promise<void> {
 
   const queryClient = createQueryClient()
 
-  const AppWithAsyncAuth = () => {
-    const [requireAuth, setRequireAuth] = React.useState<boolean | null>(null)
-    const [hasInvalidCredentials, setHasInvalidCredentials] =
-      React.useState(false)
+  const AppWithProjectContext = () => {
     const [fileTree, setFileTree] = React.useState<FileTreeNode[]>([])
     const [currentProjectRoot, setCurrentProjectRoot] =
       React.useState(projectRoot)
     const [showProjectPickerScreen, setShowProjectPickerScreen] =
       React.useState(showProjectPicker)
-
-    React.useEffect(() => {
-      // In BYOK mode, skip authentication entirely
-      if (isByokMode()) {
-        setRequireAuth(false)
-        setHasInvalidCredentials(false)
-        return
-      }
-
-      const apiKey = getAuthTokenDetails().token ?? ''
-
-      if (!apiKey) {
-        setRequireAuth(true)
-        setHasInvalidCredentials(false)
-        return
-      }
-
-      setHasInvalidCredentials(true)
-      setRequireAuth(false)
-    }, [])
 
     const loadFileTree = React.useCallback(async (root: string) => {
       try {
@@ -293,8 +240,6 @@ async function main(): Promise<void> {
       <App
         initialPrompt={initialPrompt}
         agentId={agent}
-        requireAuth={requireAuth}
-        hasInvalidCredentials={hasInvalidCredentials}
         fileTree={fileTree}
         continueChat={continueChat}
         continueChatId={continueId ?? undefined}
@@ -312,7 +257,7 @@ async function main(): Promise<void> {
   installProcessCleanupHandlers(renderer)
   createRoot(renderer).render(
     <QueryClientProvider client={queryClient}>
-      <AppWithAsyncAuth />
+      <AppWithProjectContext />
     </QueryClientProvider>,
   )
 }

@@ -5,7 +5,6 @@ import { MultipleChoiceForm } from './ask-user'
 import { FeedbackContainer } from './feedback-container'
 import { InputModeBanner } from './input-mode-banner'
 import { MultilineInput, type MultilineInputHandle } from './multiline-input'
-import { PublishContainer } from './publish-container'
 import { SuggestionMenu, type SuggestionItem } from './suggestion-menu'
 import { useAskUserBridge } from '../hooks/use-ask-user-bridge'
 import { useEvent } from '../hooks/use-event'
@@ -62,10 +61,6 @@ interface ChatInputBarProps {
   handleExitFeedback: () => void
 
   // Publish mode
-  publishMode: boolean
-  handleExitPublish: () => void
-  handlePublish: (agentIds: string[]) => Promise<void>
-
   // Handlers
   handleSubmit: () => Promise<void>
   onPaste: (fallbackText?: string) => void
@@ -101,9 +96,6 @@ export const ChatInputBar = ({
   isNarrowWidth,
   feedbackMode,
   handleExitFeedback,
-  publishMode,
-  handleExitPublish,
-  handlePublish,
   handleSubmit,
   onPaste,
 }: ChatInputBarProps) => {
@@ -160,17 +152,6 @@ export const ChatInputBar = ({
       <FeedbackContainer
         inputRef={inputRef}
         onExitFeedback={handleExitFeedback}
-        width={separatorWidth}
-      />
-    )
-  }
-
-  if (publishMode) {
-    return (
-      <PublishContainer
-        inputRef={inputRef}
-        onExitPublish={handleExitPublish}
-        onPublish={handlePublish}
         width={separatorWidth}
       />
     )

@@ -4,8 +4,8 @@ import {
   SHADOW_CHARS,
   SHEEN_STEP,
   SHEEN_INTERVAL_MS,
-} from '../login/constants'
-import { getSheenColor } from '../login/utils'
+} from '../utils/logo-constants'
+import { getSheenColor } from '../utils/logo-utils'
 
 interface UseSheenAnimationParams {
   logoColor: string

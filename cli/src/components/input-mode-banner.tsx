@@ -1,9 +1,7 @@
 import React from 'react'
 
-import { ClaudeConnectBanner } from './claude-connect-banner'
 import { HelpBanner } from './help-banner'
 import { PendingImagesBanner } from './pending-images-banner'
-import { ReferralBanner } from './referral-banner'
 import { useChatStore } from '../state/chat-store'
 
 /**
@@ -18,9 +16,7 @@ import { useChatStore } from '../state/chat-store'
 const BANNER_REGISTRY: Record<string, () => React.ReactNode> = {
   default: () => <PendingImagesBanner />,
   image: () => <PendingImagesBanner />,
-  referral: () => <ReferralBanner />,
   help: () => <HelpBanner />,
-  'connect:claude': () => <ClaudeConnectBanner />,
 }
 
 /**

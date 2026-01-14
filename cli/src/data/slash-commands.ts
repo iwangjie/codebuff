@@ -16,12 +16,6 @@ const MODE_COMMANDS: SlashCommand[] = AGENT_MODES.map((mode) => ({
 
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
-    id: 'connect:claude',
-    label: 'connect:claude',
-    description: 'Connect your Claude Pro/Max subscription',
-    aliases: ['claude'],
-  },
-  {
     id: 'init',
     label: 'init',
     description: 'Create a starter knowledge.md file',
@@ -72,23 +66,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     aliases: ['h', '?'],
   },
   ...MODE_COMMANDS,
-  {
-    id: 'referral',
-    label: 'referral',
-    description: 'Redeem a referral code for bonus credits',
-    aliases: ['redeem'],
-  },
-  {
-    id: 'publish',
-    label: 'publish',
-    description: 'Publish agents to the agent store',
-  },
-  {
-    id: 'logout',
-    label: 'logout',
-    description: 'Sign out of your session',
-    aliases: ['signout'],
-  },
   {
     id: 'exit',
     label: 'exit',

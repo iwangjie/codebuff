@@ -39,7 +39,7 @@ function removeUndefinedValues<T>(obj: T): T {
 
 /**
  * Reset the cached CodebuffClient instance.
- * This should be called after login to ensure the client is re-initialized with new credentials.
+ * This should be called after credential changes to ensure the client re-initializes.
  */
 export function resetCodebuffClient(): void {
   clientInstance = null
@@ -55,7 +55,7 @@ export async function getCodebuffClient(): Promise<CodebuffClient | null> {
     if (!apiKey) {
       logger.warn(
         {},
-        `No authentication token found. Please run the login flow or set ${API_KEY_ENV_VAR}.`,
+        `No authentication token found. Set ${API_KEY_ENV_VAR} or enable BYOK mode.`,
       )
       return null
     }
