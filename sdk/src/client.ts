@@ -1,4 +1,3 @@
-import { WEBSITE_URL } from './constants'
 import { getCodebuffApiKeyFromEnv } from './env'
 import { run } from './run'
 import { API_KEY_ENV_VAR } from '@codebuff/common/old-constants'
@@ -58,28 +57,12 @@ export class CodebuffClient {
   }
 
   /**
-   * Check connection to the Codebuff backend by hitting the /healthz endpoint.
+   * Check connection status.
+   * In local-only BYOK mode, always returns true as there's no backend to check.
    *
-   * @returns Promise that resolves to true if connected, false otherwise
+   * @returns Promise that resolves to true (always connected in local mode)
    */
   public async checkConnection(): Promise<boolean> {
-    try {
-      const response = await fetch(`${WEBSITE_URL}/api/healthz`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000), // 5 second timeout
-      })
-
-      if (!response.ok) return false
-
-      const result = await response.json()
-      return (
-        typeof result === 'object' &&
-        result !== null &&
-        'status' in result &&
-        (result as { status?: unknown }).status === 'ok'
-      )
-    } catch {
-      return false
-    }
+    return true
   }
 }

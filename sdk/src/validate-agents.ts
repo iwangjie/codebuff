@@ -1,9 +1,14 @@
+/**
+ * Local-only agent validation module.
+ * 
+ * This module validates agent definitions locally without any server communication.
+ * All validation is performed using the common validation utilities.
+ */
+
 import {
   validateAgents as validateAgentsCommon,
-  type DynamicAgentValidationError,
 } from '@codebuff/common/templates/agent-validation'
 import type { AgentDefinition } from '@codebuff/common/templates/initial-agents-dir/types/agent-definition'
-import { WEBSITE_URL } from './constants'
 
 export interface ValidationResult {
   success: boolean
@@ -16,44 +21,39 @@ export interface ValidationResult {
 
 export interface ValidateAgentsOptions {
   /**
-   * Whether to perform remote validation via the web API.
-   * Remote validation checks spawnable agents against the database.
+   * @deprecated Remote validation is not available in local-only mode.
+   * This option is ignored.
    */
   remote?: boolean
 
   /**
-   * The base URL of the Codebuff website API.
-   * Optional - defaults to NEXT_PUBLIC_CODEBUFF_APP_URL or environment-based URL.
-   * Example: 'https://codebuff.com'
+   * @deprecated No server communication in local-only mode.
+   * This option is ignored.
    */
   websiteUrl?: string
 }
 
 /**
- * Validates an array of agent definitions.
+ * Validates an array of agent definitions locally.
  *
- * By default, performs local Zod schema validation.
- * When `options.remote` is true, additionally validates spawnable agents via the web API.
+ * Performs local Zod schema validation on all agent definitions.
+ * In local-only mode, there is no remote validation available.
  *
  * @param definitions - Array of agent definitions to validate
- * @param options - Optional configuration for validation
+ * @param _options - Deprecated, ignored in local-only mode
  * @returns Promise<ValidationResult> - Validation results with any errors
  *
  * @example
  * ```typescript
- * // Local validation only
  * const result = await validateAgents(definitions)
- *
- * // Remote validation
- * const result = await validateAgents(definitions, {
- *   remote: true,
- *   websiteUrl: 'https://codebuff.com'
- * })
+ * if (!result.success) {
+ *   console.error('Validation errors:', result.validationErrors)
+ * }
  * ```
  */
 export async function validateAgents(
   definitions: AgentDefinition[],
-  options?: ValidateAgentsOptions,
+  _options?: ValidateAgentsOptions,
 ): Promise<ValidationResult> {
   // Convert array of definitions to Record<string, AgentDefinition> format
   // that the common validation functions expect
@@ -78,69 +78,14 @@ export async function validateAgents(
     error: () => {},
   }
 
-  let validationErrors: DynamicAgentValidationError[] = []
-
-  if (options?.remote) {
-    // Remote validation: call the web API
-    // Use provided websiteUrl or fall back to the default from environment
-    const websiteUrl = options.websiteUrl || WEBSITE_URL
-
-    try {
-      const response = await fetch(`${websiteUrl}/api/agents/validate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ agentDefinitions: definitions }),
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        const errorMessage =
-          (errorData as any).error ||
-          `HTTP ${response.status}: ${response.statusText}`
-
-        return {
-          success: false,
-          validationErrors: [
-            {
-              id: 'network_error',
-              message: `Failed to validate via API: ${errorMessage}`,
-            },
-          ],
-          errorCount: 1,
-        }
-      }
-
-      const data = await response.json()
-      validationErrors = data.validationErrors || []
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error)
-
-      return {
-        success: false,
-        validationErrors: [
-          {
-            id: 'network_error',
-            message: `Failed to connect to validation API: ${errorMessage}`,
-          },
-        ],
-        errorCount: 1,
-      }
-    }
-  } else {
-    // Local validation: use common package validation logic
-    const result = validateAgentsCommon({
-      agentTemplates,
-      logger,
-    })
-
-    validationErrors = result.validationErrors
-  }
+  // Local validation only: use common package validation logic
+  const result = validateAgentsCommon({
+    agentTemplates,
+    logger,
+  })
 
   // Transform validation errors to the SDK format
-  const transformedErrors = validationErrors.map((error) => ({
+  const transformedErrors = result.validationErrors.map((error) => ({
     id: error.filePath,
     message: error.message,
   }))

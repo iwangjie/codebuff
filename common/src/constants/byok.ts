@@ -5,12 +5,11 @@ export const BYOK_OPENROUTER_BASE_URL_ENV_VAR =
 
 /**
  * Check if BYOK (Bring Your Own Key) mode is enabled.
- * BYOK mode is active when the OpenRouter-compatible base URL is set.
- * The API key is optional (some local proxies don't require it).
- * In this mode, all model requests go directly to OpenRouter, bypassing Codebuff backend.
+ * 
+ * In the local-only CLI build, BYOK mode is always enabled.
+ * All model requests go directly to OpenRouter (or other compatible providers),
+ * bypassing any Codebuff backend communication.
  */
 export function isByokMode(): boolean {
-  return Boolean(
-    process.env[BYOK_OPENROUTER_BASE_URL_ENV_VAR],
-  )
+  return true
 }

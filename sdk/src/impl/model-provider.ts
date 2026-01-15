@@ -1,15 +1,14 @@
 /**
  * Model provider abstraction for routing requests to the appropriate LLM provider.
  *
- * This module handles:
+ * This is a local-only BYOK (Bring Your Own Key) implementation that handles:
  * - Claude OAuth: Direct requests to Anthropic API using user's OAuth token
- * - Default: Requests through Codebuff backend (which routes to OpenRouter)
+ * - BYOK OpenRouter: Direct requests to OpenRouter or compatible APIs using user's API key
+ * 
+ * There is no communication with any Codebuff backend server.
  */
 
-import path from 'path'
-
 import { createAnthropic } from '@ai-sdk/anthropic'
-import { BYOK_OPENROUTER_HEADER } from '@codebuff/common/constants/byok'
 import {
   CLAUDE_CODE_SYSTEM_PROMPT_PREFIX,
   CLAUDE_OAUTH_BETA_HEADERS,
@@ -17,11 +16,14 @@ import {
   toAnthropicModelId,
 } from '@codebuff/common/constants/claude-oauth'
 import {
+  BYOK_OPENROUTER_BASE_URL_ENV_VAR,
+  BYOK_OPENROUTER_ENV_VAR,
+} from '@codebuff/common/constants/byok'
+import {
   OpenAICompatibleChatLanguageModel,
   VERSION,
 } from '@codebuff/internal/openai-compatible/index'
 
-import { WEBSITE_URL } from '../constants'
 import { getValidClaudeOAuthCredentials } from '../credentials'
 import {
   getByokOpenrouterApiKeyFromEnv,
@@ -188,9 +190,9 @@ export async function getModelForRequest(params: ModelRequestParams): Promise<Mo
     }
   }
 
-  // Default: use Codebuff backend
+  // Default: use BYOK OpenRouter-compatible API
   return {
-    model: createCodebuffBackendModel(apiKey, model),
+    model: createByokModel(apiKey, model),
     isClaudeOAuth: false,
   }
 }
@@ -295,11 +297,15 @@ function createAnthropicOAuthModel(
 }
 
 /**
- * Create a model that routes through the Codebuff backend.
- * This is the existing behavior - requests go to Codebuff backend which forwards to OpenRouter.
+ * Create a model that connects directly to an OpenRouter-compatible API.
+ * This is a local-only BYOK (Bring Your Own Key) implementation.
+ * 
+ * Requires environment variables:
+ * - CODEBUFF_BYOK_OPENROUTER_BASE_URL: The base URL of the OpenRouter-compatible API
+ * - CODEBUFF_BYOK_OPENROUTER: The API key for the OpenRouter-compatible API (optional for some local proxies)
  */
-function createCodebuffBackendModel(
-  apiKey: string,
+function createByokModel(
+  _apiKey: string,
   model: string,
 ): LanguageModel {
   const openrouterUsage: OpenRouterUsageAccounting = {
@@ -312,73 +318,31 @@ function createCodebuffBackendModel(
   const openrouterApiKey = getByokOpenrouterApiKeyFromEnv()
   const openrouterBaseUrl = getByokOpenrouterBaseUrlFromEnv()
 
-  // If BYOK OpenRouter base URL is set, use direct OpenRouter connection.
-  if (openrouterBaseUrl && openrouterApiKey) {
-    const trimmedBaseUrl = openrouterBaseUrl.replace(/\/+$/, '')
-    const baseUrlWithV1 = trimmedBaseUrl.endsWith('/v1')
-      ? trimmedBaseUrl
-      : `${trimmedBaseUrl}/v1`
-
-    return new OpenAICompatibleChatLanguageModel(model, {
-      provider: 'openrouter',
-      url: ({ path: endpoint }) => `${baseUrlWithV1}${endpoint}`,
-      headers: () => ({
-        Authorization: `Bearer ${openrouterApiKey}`,
-        'user-agent': `ai-sdk/openai-compatible/${VERSION}/codebuff-byok`,
-      }),
-      metadataExtractor: {
-        extractMetadata: async ({ parsedBody }: { parsedBody: any }) => {
-          if (typeof parsedBody?.usage?.cost === 'number') {
-            openrouterUsage.cost = parsedBody.usage.cost
-          }
-          if (
-            typeof parsedBody?.usage?.cost_details?.upstream_inference_cost ===
-            'number'
-          ) {
-            openrouterUsage.costDetails.upstreamInferenceCost =
-              parsedBody.usage.cost_details.upstream_inference_cost
-          }
-          return { codebuff: { usage: openrouterUsage } }
-        },
-        createStreamExtractor: () => ({
-          processChunk: (parsedChunk: any) => {
-            if (typeof parsedChunk?.usage?.cost === 'number') {
-              openrouterUsage.cost = parsedChunk.usage.cost
-            }
-            if (
-              typeof parsedChunk?.usage?.cost_details
-                ?.upstream_inference_cost === 'number'
-            ) {
-              openrouterUsage.costDetails.upstreamInferenceCost =
-                parsedChunk.usage.cost_details.upstream_inference_cost
-            }
-          },
-          buildMetadata: () => {
-            return { codebuff: { usage: openrouterUsage } }
-          },
-        }),
-      },
-      fetch: undefined,
-      includeUsage: undefined,
-      supportsStructuredOutputs: true,
-    })
+  if (!openrouterBaseUrl) {
+    throw new Error(
+      `BYOK mode requires configuration. Please set the following environment variables:\n` +
+      `  ${BYOK_OPENROUTER_BASE_URL_ENV_VAR}: URL of your OpenRouter-compatible API (e.g., https://openrouter.ai)\n` +
+      `  ${BYOK_OPENROUTER_ENV_VAR}: Your API key (optional for some local proxies)\n\n` +
+      `Example:\n` +
+      `  export ${BYOK_OPENROUTER_BASE_URL_ENV_VAR}=https://openrouter.ai\n` +
+      `  export ${BYOK_OPENROUTER_ENV_VAR}=your-api-key`
+    )
   }
 
+  const trimmedBaseUrl = openrouterBaseUrl.replace(/\/+$/, '')
+  const baseUrlWithV1 = trimmedBaseUrl.endsWith('/v1')
+    ? trimmedBaseUrl
+    : `${trimmedBaseUrl}/v1`
+
   return new OpenAICompatibleChatLanguageModel(model, {
-    provider: 'codebuff',
-    url: ({ path: endpoint }) =>
-      new URL(path.join('/api/v1', endpoint), WEBSITE_URL).toString(),
+    provider: 'openrouter',
+    url: ({ path: endpoint }) => `${baseUrlWithV1}${endpoint}`,
     headers: () => ({
-      Authorization: `Bearer ${apiKey}`,
-      'user-agent': `ai-sdk/openai-compatible/${VERSION}/codebuff`,
-      ...(openrouterApiKey && { [BYOK_OPENROUTER_HEADER]: openrouterApiKey }),
+      ...(openrouterApiKey && { Authorization: `Bearer ${openrouterApiKey}` }),
+      'user-agent': `ai-sdk/openai-compatible/${VERSION}/codebuff-byok`,
     }),
     metadataExtractor: {
       extractMetadata: async ({ parsedBody }: { parsedBody: any }) => {
-        if (openrouterApiKey !== undefined) {
-          return { codebuff: { usage: openrouterUsage } }
-        }
-
         if (typeof parsedBody?.usage?.cost === 'number') {
           openrouterUsage.cost = parsedBody.usage.cost
         }
@@ -393,16 +357,12 @@ function createCodebuffBackendModel(
       },
       createStreamExtractor: () => ({
         processChunk: (parsedChunk: any) => {
-          if (openrouterApiKey !== undefined) {
-            return
-          }
-
           if (typeof parsedChunk?.usage?.cost === 'number') {
             openrouterUsage.cost = parsedChunk.usage.cost
           }
           if (
-            typeof parsedChunk?.usage?.cost_details?.upstream_inference_cost ===
-            'number'
+            typeof parsedChunk?.usage?.cost_details
+              ?.upstream_inference_cost === 'number'
           ) {
             openrouterUsage.costDetails.upstreamInferenceCost =
               parsedChunk.usage.cost_details.upstream_inference_cost

@@ -13,9 +13,7 @@ import { clientToolCallSchema } from '@codebuff/common/tools/list'
 import { AgentOutputSchema } from '@codebuff/common/types/session-state'
 import { cloneDeep } from 'lodash'
 
-import { getErrorStatusCode } from './error-utils'
 import { getAgentRuntimeImpl } from './impl/agent-runtime'
-import { getUserInfoFromApiKey } from './impl/database'
 import { initialSessionState, applyOverridesToSessionState } from './run-state'
 import { changeFile } from './tools/change-file'
 import { codeSearch } from './tools/code-search'
@@ -459,21 +457,8 @@ async function runOnce({
   const promptId = Math.random().toString(36).substring(2, 15)
 
   // Send input
-  let userId: string | undefined
-  try {
-    const userInfo = await getUserInfoFromApiKey({
-      ...agentRuntimeImpl,
-      apiKey,
-      fields: ['id'],
-    })
-    userId = userInfo?.id
-  } catch (error) {
-    logger?.warn(
-      { error, statusCode: getErrorStatusCode(error) },
-      'Failed to fetch user info; continuing without userId',
-    )
-    userId = undefined
-  }
+  // Local-only mode: no user info from server
+  const userId = undefined
 
   signal?.addEventListener('abort', () => {
     resolve(getCancelledRunState())
